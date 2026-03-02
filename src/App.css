@@ -183,6 +183,110 @@
   color: #994d1a;
 }
 
+.repo-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.repo-status--idle {
+  color: var(--text-secondary);
+}
+
+.repo-status--loading {
+  color: #8b651b;
+}
+
+.repo-status--success {
+  color: #1f7a3a;
+}
+
+.repo-status--error {
+  color: #932f2f;
+}
+
+.repo-selection-panel {
+  grid-column: 1 / -1;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgb(255 255 255 / 80%);
+  padding: 0.75rem;
+}
+
+.repo-selection-summary {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.repo-selection-empty {
+  margin: 0.6rem 0 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.repo-list {
+  margin: 0.65rem 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.repo-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0.5rem 0.65rem;
+}
+
+.repo-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.repo-checkbox-label input {
+  margin: 0;
+  accent-color: var(--action);
+}
+
+.repo-checkbox-label span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-visibility {
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  background: var(--panel-surface);
+}
+
+.repo-list a {
+  color: var(--action);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.repo-list a:hover {
+  text-decoration: underline;
+}
+
 .status-panel {
   margin-top: 1rem;
   display: flex;

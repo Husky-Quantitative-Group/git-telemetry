@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { GITHUB_GRAPHQL_ENDPOINT } from './config/env'
+import { useEffect, useMemo, useState } from 'react'
+import { GITHUB_GRAPHQL_ENDPOINT, GITHUB_REST_ENDPOINT } from './config/env'
 import './App.css'
 
 const DASHBOARD_SECTIONS = ['Commits', 'Pull Requests', 'Issues', 'Cycle Time']
@@ -13,11 +13,54 @@ const VIEWER_QUERY = `
 `
 
 type TokenValidationState = 'idle' | 'validating' | 'valid' | 'invalid' | 'error'
+type RepositoryDiscoveryState = 'idle' | 'loading' | 'success' | 'error'
+
+type GraphQLError = {
+  message?: string
+}
 
 type TokenValidationStatus = {
   state: TokenValidationState
   message: string
   viewerLogin?: string
+}
+
+type RepositoryDiscoveryStatus = {
+  state: RepositoryDiscoveryState
+  message: string
+}
+
+type RepositorySummary = {
+  id: string
+  nameWithOwner: string
+  isPrivate: boolean
+  url: string
+}
+
+type ViewerValidationData = {
+  viewer?: {
+    login?: string
+  }
+}
+
+type GitHubGraphQLResponse<TData> = {
+  data?: TData
+  errors?: GraphQLError[]
+}
+type RestRepositoryResponse = Array<{
+  id?: number
+  full_name?: string
+  private?: boolean
+  html_url?: string
+}>
+
+function getRepositoryOwner(nameWithOwner: string): string {
+  const separatorIndex = nameWithOwner.indexOf('/')
+  if (separatorIndex < 0) {
+    return nameWithOwner
+  }
+
+  return nameWithOwner.slice(0, separatorIndex)
 }
 
 function readTokenFromStorage(): string {
@@ -32,13 +75,51 @@ function readTokenFromStorage(): string {
   }
 }
 
+function extractGraphQLErrorMessage<TData>(payload: GitHubGraphQLResponse<TData> | null): string {
+  if (!payload?.errors || payload.errors.length === 0) {
+    return ''
+  }
+
+  return payload.errors[0]?.message ?? ''
+}
+
+async function executeGitHubGraphQL<TData>(
+  token: string,
+  query: string,
+  variables?: Record<string, unknown>,
+): Promise<{ response: Response; payload: GitHubGraphQLResponse<TData> | null }> {
+  const response = await fetch(GITHUB_GRAPHQL_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ query, variables }),
+  })
+
+  const payload = (await response.json().catch(() => null)) as GitHubGraphQLResponse<TData> | null
+
+  return {
+    response,
+    payload,
+  }
+}
+
 function App() {
   const [token, setToken] = useState<string>(() => readTokenFromStorage())
   const [persistToken, setPersistToken] = useState<boolean>(() => readTokenFromStorage().length > 0)
   const [isTokenHelpOpen, setIsTokenHelpOpen] = useState(false)
+  const [repoSearchTerm, setRepoSearchTerm] = useState('')
+  const [ownerFilter, setOwnerFilter] = useState('all')
+  const [discoveredRepos, setDiscoveredRepos] = useState<RepositorySummary[]>([])
+  const [selectedRepoIds, setSelectedRepoIds] = useState<string[]>([])
   const [tokenStatus, setTokenStatus] = useState<TokenValidationStatus>({
     state: 'idle',
     message: 'Token not validated yet.',
+  })
+  const [repoDiscoveryStatus, setRepoDiscoveryStatus] = useState<RepositoryDiscoveryStatus>({
+    state: 'idle',
+    message: 'No repositories loaded yet.',
   })
 
   useEffect(() => {
@@ -91,22 +172,8 @@ function App() {
     })
 
     try {
-      const response = await fetch(GITHUB_GRAPHQL_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${trimmedToken}`,
-        },
-        body: JSON.stringify({ query: VIEWER_QUERY }),
-      })
-
-      const payload = (await response.json().catch(() => null)) as {
-        data?: { viewer?: { login?: string } }
-        errors?: Array<{ message?: string }>
-      } | null
-
-      const errorMessage =
-        payload?.errors && payload.errors.length > 0 ? (payload.errors[0]?.message ?? '') : ''
+      const { response, payload } = await executeGitHubGraphQL<ViewerValidationData>(trimmedToken, VIEWER_QUERY)
+      const errorMessage = extractGraphQLErrorMessage(payload)
 
       if (!response.ok) {
         if (response.status === 401 || errorMessage.toLowerCase().includes('bad credentials')) {
@@ -162,8 +229,132 @@ function App() {
     }
   }
 
+  async function handleDiscoverRepositories() {
+    const trimmedToken = token.trim()
+    if (trimmedToken.length === 0) {
+      setRepoDiscoveryStatus({
+        state: 'error',
+        message: 'Enter and validate a token before repo discovery.',
+      })
+      return
+    }
+
+    setRepoDiscoveryStatus({
+      state: 'loading',
+      message: 'Discovering repositories...',
+    })
+
+    const repositoriesById = new Map<string, RepositorySummary>()
+    let hasNextPage = true
+    let pagesFetched = 0
+
+    try {
+      let page = 1
+      while (hasNextPage) {
+        const url = new URL('/user/repos', GITHUB_REST_ENDPOINT)
+        url.searchParams.set('affiliation', 'owner,organization_member,collaborator')
+        url.searchParams.set('per_page', '100')
+        url.searchParams.set('page', String(page))
+        url.searchParams.set('sort', 'updated')
+        url.searchParams.set('direction', 'desc')
+
+        const response = await fetch(url.toString(), {
+          method: 'GET',
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${trimmedToken}`,
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        })
+
+        const payload = (await response.json().catch(() => null)) as
+          | RestRepositoryResponse
+          | { message?: string }
+          | null
+
+        if (!response.ok) {
+          const responseErrorMessage =
+            payload && !Array.isArray(payload) && payload.message
+              ? payload.message
+              : `Repo discovery failed with HTTP ${response.status}.`
+
+          setRepoDiscoveryStatus({
+            state: 'error',
+            message: responseErrorMessage,
+          })
+          return
+        }
+
+        if (!Array.isArray(payload)) {
+          setRepoDiscoveryStatus({
+            state: 'error',
+            message: 'GitHub response did not include repository list data.',
+          })
+          return
+        }
+
+        for (const repo of payload) {
+          if (!repo.id || !repo.full_name || !repo.html_url) {
+            continue
+          }
+
+          const repoId = String(repo.id)
+          repositoriesById.set(repoId, {
+            id: repoId,
+            nameWithOwner: repo.full_name,
+            isPrivate: repo.private ?? false,
+            url: repo.html_url,
+          })
+        }
+
+        pagesFetched += 1
+        setRepoDiscoveryStatus({
+          state: 'loading',
+          message: `Discovering repositories via HTTP... fetched ${pagesFetched} page${pagesFetched === 1 ? '' : 's'}.`,
+        })
+
+        hasNextPage = payload.length === 100
+        page += 1
+      }
+
+      const repositoryList = Array.from(repositoriesById.values()).sort((a, b) =>
+        a.nameWithOwner.localeCompare(b.nameWithOwner),
+      )
+      const discoveredRepoIdSet = new Set(repositoryList.map((repo) => repo.id))
+
+      setDiscoveredRepos(repositoryList)
+      setOwnerFilter((previous) => {
+        if (previous === 'all') {
+          return previous
+        }
+
+        const ownerExists = repositoryList.some((repo) => getRepositoryOwner(repo.nameWithOwner) === previous)
+        return ownerExists ? previous : 'all'
+      })
+      setSelectedRepoIds((previous) => previous.filter((id) => discoveredRepoIdSet.has(id)))
+      setRepoDiscoveryStatus({
+        state: 'success',
+        message: `Loaded ${repositoryList.length} repositories.`,
+      })
+    } catch {
+      setRepoDiscoveryStatus({
+        state: 'error',
+        message: 'Network error while discovering repositories.',
+      })
+    }
+  }
+
   function handleClearToken() {
     setToken('')
+    setPersistToken(false)
+    setRepoSearchTerm('')
+    setOwnerFilter('all')
+    setDiscoveredRepos([])
+    setSelectedRepoIds([])
+    setRepoDiscoveryStatus({
+      state: 'idle',
+      message: 'No repositories loaded yet.',
+    })
     setTokenStatus({
       state: 'idle',
       message: 'Token cleared.',
@@ -184,7 +375,62 @@ function App() {
   }
 
   const isValidating = tokenStatus.state === 'validating'
+  const isDiscoveringRepos = repoDiscoveryStatus.state === 'loading'
   const tokenStatusClassName = `token-status token-status--${tokenStatus.state}`
+  const repoStatusClassName = `repo-status repo-status--${repoDiscoveryStatus.state}`
+  const selectedRepoIdSet = useMemo(() => new Set(selectedRepoIds), [selectedRepoIds])
+  const availableOwners = useMemo(() => {
+    const uniqueOwners = new Set<string>()
+    for (const repo of discoveredRepos) {
+      uniqueOwners.add(getRepositoryOwner(repo.nameWithOwner))
+    }
+
+    return Array.from(uniqueOwners).sort((a, b) => a.localeCompare(b))
+  }, [discoveredRepos])
+  const filteredRepos = useMemo(() => {
+    const searchValue = repoSearchTerm.trim().toLowerCase()
+    const ownerFilteredRepos =
+      ownerFilter === 'all'
+        ? discoveredRepos
+        : discoveredRepos.filter((repo) => getRepositoryOwner(repo.nameWithOwner) === ownerFilter)
+
+    if (searchValue.length === 0) {
+      return ownerFilteredRepos
+    }
+
+    return ownerFilteredRepos.filter((repo) => repo.nameWithOwner.toLowerCase().includes(searchValue))
+  }, [discoveredRepos, ownerFilter, repoSearchTerm])
+  const areAllVisibleReposSelected =
+    filteredRepos.length > 0 && filteredRepos.every((repo) => selectedRepoIdSet.has(repo.id))
+
+  function handleToggleRepositorySelection(repoId: string) {
+    setSelectedRepoIds((previous) => {
+      if (previous.includes(repoId)) {
+        return previous.filter((id) => id !== repoId)
+      }
+
+      return [...previous, repoId]
+    })
+  }
+
+  function handleSelectAllVisibleRepos() {
+    if (filteredRepos.length === 0) {
+      return
+    }
+
+    setSelectedRepoIds((previous) => {
+      const nextSelected = new Set(previous)
+      for (const repo of filteredRepos) {
+        nextSelected.add(repo.id)
+      }
+
+      return Array.from(nextSelected)
+    })
+  }
+
+  function handleClearSelectedRepos() {
+    setSelectedRepoIds([])
+  }
 
   return (
     <div className="app-shell">
@@ -215,6 +461,14 @@ function App() {
                 value={token}
                 onChange={(event) => {
                   setToken(event.target.value)
+                  setRepoSearchTerm('')
+                  setOwnerFilter('all')
+                  setDiscoveredRepos([])
+                  setSelectedRepoIds([])
+                  setRepoDiscoveryStatus({
+                    state: 'idle',
+                    message: 'No repositories loaded yet.',
+                  })
                   setTokenStatus({
                     state: 'idle',
                     message: 'Token changed. Re-validate before running analysis.',
@@ -254,15 +508,80 @@ function App() {
                 <option value="custom">Custom range</option>
               </select>
             </label>
+            <label className="control-field">
+              <span>Owner Filter</span>
+              <select
+                value={ownerFilter}
+                onChange={(event) => setOwnerFilter(event.target.value)}
+                disabled={availableOwners.length === 0}
+              >
+                <option value="all">All owners</option>
+                {availableOwners.map((owner) => (
+                  <option key={owner} value={owner}>
+                    {owner}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label className="control-field control-field--full">
-              <span>Repository Selection</span>
-              <input type="text" placeholder="Search repositories or add owner/repo" />
+              <span>Repository Search</span>
+              <input
+                type="text"
+                placeholder="Filter discovered repositories by owner/repo"
+                value={repoSearchTerm}
+                onChange={(event) => setRepoSearchTerm(event.target.value)}
+                disabled={discoveredRepos.length === 0}
+              />
             </label>
             <div className="action-row">
-              <button type="button">Discover Repos</button>
+              <button type="button" onClick={handleDiscoverRepositories} disabled={isDiscoveringRepos}>
+                {isDiscoveringRepos ? 'Discovering...' : 'Discover Repos'}
+              </button>
+              <button
+                type="button"
+                onClick={handleSelectAllVisibleRepos}
+                disabled={filteredRepos.length === 0 || areAllVisibleReposSelected}
+              >
+                Select All Visible
+              </button>
+              <button type="button" onClick={handleClearSelectedRepos} disabled={selectedRepoIds.length === 0}>
+                Clear Selection
+              </button>
               <button type="button" className="button-primary">
                 Run Analysis
               </button>
+            </div>
+            <p className={repoStatusClassName}>{repoDiscoveryStatus.message}</p>
+            <div className="repo-selection-panel">
+              <p className="repo-selection-summary">
+                Selected {selectedRepoIds.length} of {discoveredRepos.length} repositories
+              </p>
+              {filteredRepos.length === 0 ? (
+                <p className="repo-selection-empty">
+                  {discoveredRepos.length === 0
+                    ? 'Discover repositories to start selecting.'
+                    : 'No repositories match your search.'}
+                </p>
+              ) : (
+                <ul className="repo-list">
+                  {filteredRepos.map((repo) => (
+                    <li key={repo.id}>
+                      <label className="repo-checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={selectedRepoIdSet.has(repo.id)}
+                          onChange={() => handleToggleRepositorySelection(repo.id)}
+                        />
+                        <span>{repo.nameWithOwner}</span>
+                        <span className="repo-visibility">{repo.isPrivate ? 'Private' : 'Public'}</span>
+                      </label>
+                      <a href={repo.url} target="_blank" rel="noreferrer">
+                        Open
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
         </div>
