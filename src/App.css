@@ -439,8 +439,15 @@
 }
 
 .matrix-panel h3,
-.run-errors-panel h3 {
+.run-errors-panel h3,
+.rate-limit-panel h3 {
   margin: 0;
+}
+
+.rate-limit-panel p {
+  margin: 0.45rem 0 0;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
 }
 
 .matrix-empty {

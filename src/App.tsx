@@ -25,7 +25,99 @@ const REPO_DATA_COLUMNS = [
   { key: 'issues', label: 'Issues' },
   { key: 'commits', label: 'Commits' },
 ] as const
-const MOCK_REPO_STEP_DELAY_MS = 220
+const REPOSITORY_DEFAULT_BRANCH_QUERY = `
+  query RepositoryDefaultBranch($owner: String!, $name: String!) {
+    repository(owner: $owner, name: $name) {
+      defaultBranchRef {
+        name
+      }
+    }
+  }
+`
+const SEARCH_PULL_REQUESTS_QUERY = `
+  query SearchPullRequests($searchQuery: String!, $cursor: String) {
+    search(type: ISSUE, query: $searchQuery, first: 100, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        ... on PullRequest {
+          id
+          number
+          title
+          url
+          createdAt
+          mergedAt
+          isDraft
+          author {
+            login
+          }
+        }
+      }
+    }
+  }
+`
+const SEARCH_ISSUES_QUERY = `
+  query SearchIssues($searchQuery: String!, $cursor: String) {
+    search(type: ISSUE, query: $searchQuery, first: 100, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        ... on Issue {
+          id
+          number
+          title
+          url
+          createdAt
+          closedAt
+          author {
+            login
+          }
+        }
+      }
+    }
+  }
+`
+const REPOSITORY_COMMITS_QUERY = `
+  query RepositoryCommits(
+    $owner: String!
+    $name: String!
+    $qualifiedName: String!
+    $cursor: String
+    $since: GitTimestamp
+    $until: GitTimestamp
+  ) {
+    repository(owner: $owner, name: $name) {
+      ref(qualifiedName: $qualifiedName) {
+        target {
+          ... on Commit {
+            history(first: 100, after: $cursor, since: $since, until: $until) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              nodes {
+                oid
+                committedDate
+                authoredDate
+                url
+                author {
+                  user {
+                    login
+                  }
+                  name
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`
 
 type TokenValidationState = 'idle' | 'validating' | 'valid' | 'invalid' | 'error'
 type RepositoryDiscoveryState = 'idle' | 'loading' | 'success' | 'error'
@@ -73,11 +165,148 @@ type RunErrorItem = {
   dataKey?: RepoDataKey
 }
 
+type RunDateRange = {
+  startIso: string
+  endIso: string
+  startDay: string
+  endDay: string
+  label: string
+}
+
+type RateLimitSnapshot = {
+  limit: number
+  remaining: number
+  used: number
+  resetAt: string
+  updatedAt: string
+}
+
+type PullRequestRecord = {
+  id: string
+  number: number
+  title: string
+  url: string
+  createdAt: string
+  mergedAt: string
+  isDraft: boolean
+  authorLogin?: string
+}
+
+type IssueRecord = {
+  id: string
+  number: number
+  title: string
+  url: string
+  createdAt: string
+  closedAt?: string | null
+  authorLogin?: string
+}
+
+type CommitRecord = {
+  oid: string
+  authoredDate: string
+  committedDate: string
+  url: string
+  authorLogin?: string
+  authorName?: string
+}
+
+type RepoAnalysisData = {
+  repoId: string
+  repoName: string
+  defaultBranch?: string
+  pullRequests: PullRequestRecord[]
+  issuesOpened: IssueRecord[]
+  issuesClosed: IssueRecord[]
+  commits: CommitRecord[]
+}
+
 type ViewerValidationData = {
   viewer?: {
     login?: string
   }
 }
+
+type RepositoryDefaultBranchData = {
+  repository?: {
+    defaultBranchRef?: {
+      name?: string
+    } | null
+  } | null
+}
+
+type SearchConnectionPageInfo = {
+  hasNextPage?: boolean
+  endCursor?: string | null
+}
+
+type SearchPullRequestsData = {
+  search?: {
+    pageInfo?: SearchConnectionPageInfo
+    nodes?: Array<
+      | {
+          id?: string
+          number?: number
+          title?: string
+          url?: string
+          createdAt?: string
+          mergedAt?: string
+          isDraft?: boolean
+          author?: { login?: string } | null
+        }
+      | null
+    >
+  } | null
+}
+
+type SearchIssuesData = {
+  search?: {
+    pageInfo?: SearchConnectionPageInfo
+    nodes?: Array<
+      | {
+          id?: string
+          number?: number
+          title?: string
+          url?: string
+          createdAt?: string
+          closedAt?: string | null
+          author?: { login?: string } | null
+        }
+      | null
+    >
+  } | null
+}
+
+type RepositoryCommitsData = {
+  repository?: {
+    ref?: {
+      target?: {
+        history?: {
+          pageInfo?: SearchConnectionPageInfo
+          nodes?: Array<
+            | {
+                oid?: string
+                authoredDate?: string
+                committedDate?: string
+                url?: string
+                author?: {
+                  user?: { login?: string } | null
+                  name?: string | null
+                } | null
+              }
+            | null
+          >
+        } | null
+      } | null
+    } | null
+  } | null
+}
+
+type SearchPullRequestConnection = NonNullable<SearchPullRequestsData['search']>
+type SearchIssuesConnection = NonNullable<SearchIssuesData['search']>
+type CommitHistoryConnection = NonNullable<
+  NonNullable<NonNullable<NonNullable<RepositoryCommitsData['repository']>['ref']>['target']>['history']
+>
 
 type GitHubGraphQLResponse<TData> = {
   data?: TData
@@ -90,10 +319,26 @@ type RestRepositoryResponse = Array<{
   html_url?: string
 }>
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
+function formatDateInput(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
+
+function getDateDaysAgo(days: number): Date {
+  const date = new Date()
+  date.setUTCDate(date.getUTCDate() - days)
+  return date
+}
+
+function splitRepositoryName(nameWithOwner: string): { owner: string; name: string } | null {
+  const separatorIndex = nameWithOwner.indexOf('/')
+  if (separatorIndex <= 0 || separatorIndex >= nameWithOwner.length - 1) {
+    return null
+  }
+
+  return {
+    owner: nameWithOwner.slice(0, separatorIndex),
+    name: nameWithOwner.slice(separatorIndex + 1),
+  }
 }
 
 function createStepStatusMap(initialStatus: ProgressStatus): StepStatusMap {
@@ -123,6 +368,54 @@ function getRepositoryOwner(nameWithOwner: string): string {
   }
 
   return nameWithOwner.slice(0, separatorIndex)
+}
+
+function parseRateLimitSnapshot(response: Response): RateLimitSnapshot | null {
+  const limit = Number(response.headers.get('x-ratelimit-limit'))
+  const remaining = Number(response.headers.get('x-ratelimit-remaining'))
+  const used = Number(response.headers.get('x-ratelimit-used'))
+  const resetSeconds = Number(response.headers.get('x-ratelimit-reset'))
+
+  if (
+    Number.isNaN(limit) ||
+    Number.isNaN(remaining) ||
+    Number.isNaN(used) ||
+    Number.isNaN(resetSeconds)
+  ) {
+    return null
+  }
+
+  return {
+    limit,
+    remaining,
+    used,
+    resetAt: new Date(resetSeconds * 1000).toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function getGraphQLRequestError<TData>(
+  response: Response,
+  payload: GitHubGraphQLResponse<TData> | null,
+): string | null {
+  const graphQlMessage = extractGraphQLErrorMessage(payload)
+  if (!response.ok) {
+    if (graphQlMessage.length > 0) {
+      return graphQlMessage
+    }
+
+    return `GitHub request failed with HTTP ${response.status}.`
+  }
+
+  if (graphQlMessage.length > 0) {
+    return graphQlMessage
+  }
+
+  if (!payload?.data) {
+    return 'GitHub response did not include data.'
+  }
+
+  return null
 }
 
 function readTokenFromStorage(): string {
@@ -171,6 +464,9 @@ function App() {
   const [token, setToken] = useState<string>(() => readTokenFromStorage())
   const [persistToken, setPersistToken] = useState<boolean>(() => readTokenFromStorage().length > 0)
   const [isTokenHelpOpen, setIsTokenHelpOpen] = useState(false)
+  const [timeRangePreset, setTimeRangePreset] = useState<'30' | '90' | '365' | 'custom'>('365')
+  const [customRangeStart, setCustomRangeStart] = useState<string>(() => formatDateInput(getDateDaysAgo(365)))
+  const [customRangeEnd, setCustomRangeEnd] = useState<string>(() => formatDateInput(new Date()))
   const [repoSearchTerm, setRepoSearchTerm] = useState('')
   const [ownerFilter, setOwnerFilter] = useState('all')
   const [discoveredRepos, setDiscoveredRepos] = useState<RepositorySummary[]>([])
@@ -191,6 +487,9 @@ function App() {
   const [runErrors, setRunErrors] = useState<RunErrorItem[]>([])
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
   const [runFinishedAt, setRunFinishedAt] = useState<number | null>(null)
+  const [lastRunRangeLabel, setLastRunRangeLabel] = useState<string>('Last 365 days')
+  const [rateLimitSnapshot, setRateLimitSnapshot] = useState<RateLimitSnapshot | null>(null)
+  const [analysisDataByRepo, setAnalysisDataByRepo] = useState<Record<string, RepoAnalysisData>>({})
   const runSequenceRef = useRef(0)
   const activeRunRef = useRef<number | null>(null)
 
@@ -228,9 +527,93 @@ function App() {
     }
   }, [isTokenHelpOpen])
 
+  function updateRateLimitFromResponse(response: Response) {
+    const snapshot = parseRateLimitSnapshot(response)
+    if (!snapshot) {
+      return
+    }
+
+    setRateLimitSnapshot(snapshot)
+  }
+
+  function resolveRunDateRange():
+    | { ok: true; range: RunDateRange }
+    | { ok: false; message: string } {
+    if (timeRangePreset === 'custom') {
+      if (customRangeStart.length === 0 || customRangeEnd.length === 0) {
+        return {
+          ok: false,
+          message: 'Choose both start and end dates for a custom range.',
+        }
+      }
+
+      const startDate = new Date(`${customRangeStart}T00:00:00.000Z`)
+      const endDate = new Date(`${customRangeEnd}T23:59:59.999Z`)
+      if (Number.isNaN(startDate.valueOf()) || Number.isNaN(endDate.valueOf())) {
+        return {
+          ok: false,
+          message: 'Custom range dates are invalid.',
+        }
+      }
+
+      if (startDate > endDate) {
+        return {
+          ok: false,
+          message: 'Custom range start date must be before end date.',
+        }
+      }
+
+      return {
+        ok: true,
+        range: {
+          startIso: startDate.toISOString(),
+          endIso: endDate.toISOString(),
+          startDay: customRangeStart,
+          endDay: customRangeEnd,
+          label: `${customRangeStart} to ${customRangeEnd}`,
+        },
+      }
+    }
+
+    const days = Number(timeRangePreset)
+    if (!Number.isFinite(days) || days <= 0) {
+      return {
+        ok: false,
+        message: 'Time range preset is invalid.',
+      }
+    }
+
+    const endDate = new Date()
+    endDate.setUTCHours(23, 59, 59, 999)
+    const startDate = new Date()
+    startDate.setUTCDate(startDate.getUTCDate() - days)
+    startDate.setUTCHours(0, 0, 0, 0)
+
+    return {
+      ok: true,
+      range: {
+        startIso: startDate.toISOString(),
+        endIso: endDate.toISOString(),
+        startDay: startDate.toISOString().slice(0, 10),
+        endDay: endDate.toISOString().slice(0, 10),
+        label: `Last ${days} days`,
+      },
+    }
+  }
+
+  async function executeGraphQLWithRateLimit<TData>(
+    trimmedToken: string,
+    query: string,
+    variables?: Record<string, unknown>,
+  ) {
+    const result = await executeGitHubGraphQL<TData>(trimmedToken, query, variables)
+    updateRateLimitFromResponse(result.response)
+    return result
+  }
+
   async function validateTokenWithGitHub(trimmedToken: string): Promise<TokenValidationStatus> {
     try {
-      const { response, payload } = await executeGitHubGraphQL<ViewerValidationData>(trimmedToken, VIEWER_QUERY)
+      const { response, payload } = await executeGraphQLWithRateLimit<ViewerValidationData>(trimmedToken, VIEWER_QUERY)
       const errorMessage = extractGraphQLErrorMessage(payload)
 
       if (!response.ok) {
@@ -432,6 +815,9 @@ function App() {
     setRunErrors([])
     setRunStartedAt(null)
     setRunFinishedAt(null)
+    setLastRunRangeLabel('Last 365 days')
+    setRateLimitSnapshot(null)
+    setAnalysisDataByRepo({})
     setRepoDiscoveryStatus({
       state: 'idle',
       message: 'No repositories loaded yet.',
@@ -509,6 +895,7 @@ function App() {
               : 'Error'
   const runPhaseClassName = `run-phase-badge run-phase-badge--${runPhase}`
   const rerunButtonLabel = runPhase === 'idle' ? 'Start Run' : 'Retry Run'
+  const loadedRepoCount = Object.keys(analysisDataByRepo).length
 
   function handleToggleRepositorySelection(repoId: string) {
     setSelectedRepoIds((previous) => {
@@ -562,36 +949,219 @@ function App() {
     )
   }
 
+  function addRunError(errorItem: RunErrorItem) {
+    setRunErrors((previous) => [...previous, errorItem])
+  }
+
   function isRunActive(runId: number): boolean {
     return activeRunRef.current === runId
   }
 
-  async function runRepoStep(
-    runId: number,
-    stepKey: RunStepKey,
-    dataKey: RepoDataKey,
-    repositories: RepositorySummary[],
-  ): Promise<boolean> {
-    setActiveStep(stepKey)
-    setStepStatus(stepKey, 'fetching')
-
-    for (const repository of repositories) {
-      if (!isRunActive(runId)) {
-        return false
-      }
-
-      setRepoDataStatus(repository.id, dataKey, 'fetching')
-      await delay(MOCK_REPO_STEP_DELAY_MS)
-
-      if (!isRunActive(runId)) {
-        return false
-      }
-
-      setRepoDataStatus(repository.id, dataKey, 'done')
+  async function fetchDefaultBranchForRepo(trimmedToken: string, repoNameWithOwner: string): Promise<string> {
+    const parsedName = splitRepositoryName(repoNameWithOwner)
+    if (!parsedName) {
+      throw new Error(`Repository name is invalid: ${repoNameWithOwner}`)
     }
 
-    setStepStatus(stepKey, 'done')
-    return true
+    const { response, payload } = await executeGraphQLWithRateLimit<RepositoryDefaultBranchData>(
+      trimmedToken,
+      REPOSITORY_DEFAULT_BRANCH_QUERY,
+      {
+        owner: parsedName.owner,
+        name: parsedName.name,
+      },
+    )
+
+    const requestError = getGraphQLRequestError(response, payload)
+    if (requestError) {
+      throw new Error(requestError)
+    }
+
+    const defaultBranch = payload?.data?.repository?.defaultBranchRef?.name
+    if (!defaultBranch) {
+      throw new Error('Default branch could not be resolved for repository.')
+    }
+
+    return defaultBranch
+  }
+
+  async function fetchMergedPullRequestsForRepo(
+    trimmedToken: string,
+    repoNameWithOwner: string,
+    range: RunDateRange,
+  ): Promise<PullRequestRecord[]> {
+    const pullRequests: PullRequestRecord[] = []
+    let cursor: string | null = null
+    let hasNextPage = true
+    const searchQuery = `repo:${repoNameWithOwner} is:pr is:merged merged:${range.startDay}..${range.endDay} sort:updated-desc`
+
+    while (hasNextPage) {
+      const queryResult: { response: Response; payload: GitHubGraphQLResponse<SearchPullRequestsData> | null } =
+        await executeGraphQLWithRateLimit<SearchPullRequestsData>(trimmedToken, SEARCH_PULL_REQUESTS_QUERY, {
+          searchQuery,
+          cursor,
+        })
+      const response = queryResult.response
+      const payload = queryResult.payload
+
+      const requestError = getGraphQLRequestError(response, payload)
+      if (requestError) {
+        throw new Error(requestError)
+      }
+
+      const searchResult = payload?.data?.search as SearchPullRequestConnection | undefined
+      if (!searchResult) {
+        throw new Error('Search response for pull requests was missing.')
+      }
+
+      const nodes = searchResult.nodes ?? []
+      for (const node of nodes) {
+        if (
+          !node?.id ||
+          node.number === undefined ||
+          !node.title ||
+          !node.url ||
+          !node.createdAt ||
+          !node.mergedAt
+        ) {
+          continue
+        }
+
+        pullRequests.push({
+          id: node.id,
+          number: node.number,
+          title: node.title,
+          url: node.url,
+          createdAt: node.createdAt,
+          mergedAt: node.mergedAt,
+          isDraft: node.isDraft ?? false,
+          authorLogin: node.author?.login,
+        })
+      }
+
+      hasNextPage = searchResult.pageInfo?.hasNextPage === true
+      cursor = searchResult.pageInfo?.endCursor ?? null
+    }
+
+    return pullRequests
+  }
+
+  async function fetchIssuesForRepo(
+    trimmedToken: string,
+    repoNameWithOwner: string,
+    range: RunDateRange,
+    mode: 'opened' | 'closed',
+  ): Promise<IssueRecord[]> {
+    const issues: IssueRecord[] = []
+    let cursor: string | null = null
+    let hasNextPage = true
+    const qualifier =
+      mode === 'opened' ? `created:${range.startDay}..${range.endDay}` : `is:closed closed:${range.startDay}..${range.endDay}`
+    const searchQuery = `repo:${repoNameWithOwner} is:issue ${qualifier} sort:updated-desc`
+
+    while (hasNextPage) {
+      const queryResult: { response: Response; payload: GitHubGraphQLResponse<SearchIssuesData> | null } =
+        await executeGraphQLWithRateLimit<SearchIssuesData>(trimmedToken, SEARCH_ISSUES_QUERY, {
+          searchQuery,
+          cursor,
+        })
+      const response = queryResult.response
+      const payload = queryResult.payload
+
+      const requestError = getGraphQLRequestError(response, payload)
+      if (requestError) {
+        throw new Error(requestError)
+      }
+
+      const searchResult = payload?.data?.search as SearchIssuesConnection | undefined
+      if (!searchResult) {
+        throw new Error('Search response for issues was missing.')
+      }
+
+      const nodes = searchResult.nodes ?? []
+      for (const node of nodes) {
+        if (!node?.id || node.number === undefined || !node.title || !node.url || !node.createdAt) {
+          continue
+        }
+
+        issues.push({
+          id: node.id,
+          number: node.number,
+          title: node.title,
+          url: node.url,
+          createdAt: node.createdAt,
+          closedAt: node.closedAt,
+          authorLogin: node.author?.login,
+        })
+      }
+
+      hasNextPage = searchResult.pageInfo?.hasNextPage === true
+      cursor = searchResult.pageInfo?.endCursor ?? null
+    }
+
+    return issues
+  }
+
+  async function fetchCommitsForRepo(
+    trimmedToken: string,
+    repoNameWithOwner: string,
+    defaultBranch: string,
+    range: RunDateRange,
+  ): Promise<CommitRecord[]> {
+    const parsedName = splitRepositoryName(repoNameWithOwner)
+    if (!parsedName) {
+      throw new Error(`Repository name is invalid: ${repoNameWithOwner}`)
+    }
+
+    const commits: CommitRecord[] = []
+    let cursor: string | null = null
+    let hasNextPage = true
+    const qualifiedName = `refs/heads/${defaultBranch}`
+
+    while (hasNextPage) {
+      const queryResult: { response: Response; payload: GitHubGraphQLResponse<RepositoryCommitsData> | null } =
+        await executeGraphQLWithRateLimit<RepositoryCommitsData>(trimmedToken, REPOSITORY_COMMITS_QUERY, {
+          owner: parsedName.owner,
+          name: parsedName.name,
+          qualifiedName,
+          cursor,
+          since: range.startIso,
+          until: range.endIso,
+        })
+      const response = queryResult.response
+      const payload = queryResult.payload
+
+      const requestError = getGraphQLRequestError(response, payload)
+      if (requestError) {
+        throw new Error(requestError)
+      }
+
+      const history = payload?.data?.repository?.ref?.target?.history as CommitHistoryConnection | undefined
+      if (!history) {
+        throw new Error('Commit history was not available for default branch.')
+      }
+
+      const nodes = history.nodes ?? []
+      for (const node of nodes) {
+        if (!node?.oid || !node.authoredDate || !node.committedDate || !node.url) {
+          continue
+        }
+
+        commits.push({
+          oid: node.oid,
+          authoredDate: node.authoredDate,
+          committedDate: node.committedDate,
+          url: node.url,
+          authorLogin: node.author?.user?.login ?? undefined,
+          authorName: node.author?.name ?? undefined,
+        })
+      }
+
+      hasNextPage = history.pageInfo?.hasNextPage === true
+      cursor = history.pageInfo?.endCursor ?? null
+    }
+
+    return commits
   }
 
   async function handleRunAnalysis() {
@@ -612,10 +1182,32 @@ function App() {
       return
     }
 
+    const resolvedRange = resolveRunDateRange()
+    if (!resolvedRange.ok) {
+      setRepoDiscoveryStatus({
+        state: 'error',
+        message: resolvedRange.message,
+      })
+      return
+    }
+
+    const runRange = resolvedRange.range
     const runId = runSequenceRef.current + 1
     runSequenceRef.current = runId
     activeRunRef.current = runId
     const runStarted = Date.now()
+    let hasAnyErrors = false
+    const nextAnalysisDataByRepo: Record<string, RepoAnalysisData> = {}
+    for (const repository of selectedRepos) {
+      nextAnalysisDataByRepo[repository.id] = {
+        repoId: repository.id,
+        repoName: repository.nameWithOwner,
+        pullRequests: [],
+        issuesOpened: [],
+        issuesClosed: [],
+        commits: [],
+      }
+    }
 
     setCurrentRunId(runId)
     setRunPhase('running')
@@ -623,7 +1215,9 @@ function App() {
     setRunErrors([])
     setRunStartedAt(runStarted)
     setRunFinishedAt(null)
+    setLastRunRangeLabel(runRange.label)
     setStepStatuses(createStepStatusMap('queued'))
+    setAnalysisDataByRepo({})
     setRepoMatrixRows(
       selectedRepos.map((repo) => ({
         repoId: repo.id,
@@ -663,45 +1257,166 @@ function App() {
 
     setActiveStep('repoPrep')
     setStepStatus('repoPrep', 'fetching')
+    let repoPrepHasErrors = false
     for (const repository of selectedRepos) {
       if (!isRunActive(runId)) {
         return
       }
 
       setRepoDataStatus(repository.id, 'defaultBranch', 'fetching')
-      await delay(MOCK_REPO_STEP_DELAY_MS)
+      try {
+        const defaultBranch = await fetchDefaultBranchForRepo(trimmedToken, repository.nameWithOwner)
+        if (!isRunActive(runId)) {
+          return
+        }
+
+        nextAnalysisDataByRepo[repository.id].defaultBranch = defaultBranch
+        setRepoDataStatus(repository.id, 'defaultBranch', 'done')
+      } catch (error) {
+        repoPrepHasErrors = true
+        hasAnyErrors = true
+        const message = error instanceof Error ? error.message : 'Failed to resolve default branch.'
+        setRepoDataStatus(repository.id, 'defaultBranch', 'error')
+        addRunError({
+          step: 'repoPrep',
+          repoId: repository.id,
+          repoName: repository.nameWithOwner,
+          dataKey: 'defaultBranch',
+          message,
+        })
+      }
+    }
+    setStepStatus('repoPrep', repoPrepHasErrors ? 'error' : 'done')
+
+    setActiveStep('prs')
+    setStepStatus('prs', 'fetching')
+    let prStepHasErrors = false
+    for (const repository of selectedRepos) {
       if (!isRunActive(runId)) {
         return
       }
 
-      setRepoDataStatus(repository.id, 'defaultBranch', 'done')
-    }
-    setStepStatus('repoPrep', 'done')
+      setRepoDataStatus(repository.id, 'prs', 'fetching')
+      try {
+        const pullRequests = await fetchMergedPullRequestsForRepo(trimmedToken, repository.nameWithOwner, runRange)
+        if (!isRunActive(runId)) {
+          return
+        }
 
-    const prStepCompleted = await runRepoStep(runId, 'prs', 'prs', selectedRepos)
-    if (!prStepCompleted) {
-      return
+        nextAnalysisDataByRepo[repository.id].pullRequests = pullRequests
+        setRepoDataStatus(repository.id, 'prs', 'done')
+      } catch (error) {
+        prStepHasErrors = true
+        hasAnyErrors = true
+        const message = error instanceof Error ? error.message : 'Failed to fetch pull requests.'
+        setRepoDataStatus(repository.id, 'prs', 'error')
+        addRunError({
+          step: 'prs',
+          repoId: repository.id,
+          repoName: repository.nameWithOwner,
+          dataKey: 'prs',
+          message,
+        })
+      }
     }
+    setStepStatus('prs', prStepHasErrors ? 'error' : 'done')
 
-    const issuesStepCompleted = await runRepoStep(runId, 'issues', 'issues', selectedRepos)
-    if (!issuesStepCompleted) {
-      return
-    }
+    setActiveStep('issues')
+    setStepStatus('issues', 'fetching')
+    let issuesStepHasErrors = false
+    for (const repository of selectedRepos) {
+      if (!isRunActive(runId)) {
+        return
+      }
 
-    const commitsStepCompleted = await runRepoStep(runId, 'commits', 'commits', selectedRepos)
-    if (!commitsStepCompleted) {
-      return
+      setRepoDataStatus(repository.id, 'issues', 'fetching')
+      try {
+        const openedIssues = await fetchIssuesForRepo(trimmedToken, repository.nameWithOwner, runRange, 'opened')
+        if (!isRunActive(runId)) {
+          return
+        }
+        const closedIssues = await fetchIssuesForRepo(trimmedToken, repository.nameWithOwner, runRange, 'closed')
+        if (!isRunActive(runId)) {
+          return
+        }
+
+        nextAnalysisDataByRepo[repository.id].issuesOpened = openedIssues
+        nextAnalysisDataByRepo[repository.id].issuesClosed = closedIssues
+        setRepoDataStatus(repository.id, 'issues', 'done')
+      } catch (error) {
+        issuesStepHasErrors = true
+        hasAnyErrors = true
+        const message = error instanceof Error ? error.message : 'Failed to fetch issues.'
+        setRepoDataStatus(repository.id, 'issues', 'error')
+        addRunError({
+          step: 'issues',
+          repoId: repository.id,
+          repoName: repository.nameWithOwner,
+          dataKey: 'issues',
+          message,
+        })
+      }
     }
+    setStepStatus('issues', issuesStepHasErrors ? 'error' : 'done')
+
+    setActiveStep('commits')
+    setStepStatus('commits', 'fetching')
+    let commitsStepHasErrors = false
+    for (const repository of selectedRepos) {
+      if (!isRunActive(runId)) {
+        return
+      }
+
+      setRepoDataStatus(repository.id, 'commits', 'fetching')
+      const defaultBranch = nextAnalysisDataByRepo[repository.id].defaultBranch
+      if (!defaultBranch) {
+        commitsStepHasErrors = true
+        hasAnyErrors = true
+        setRepoDataStatus(repository.id, 'commits', 'error')
+        addRunError({
+          step: 'commits',
+          repoId: repository.id,
+          repoName: repository.nameWithOwner,
+          dataKey: 'commits',
+          message: 'Cannot fetch commits because default branch was not resolved.',
+        })
+        continue
+      }
+
+      try {
+        const commits = await fetchCommitsForRepo(trimmedToken, repository.nameWithOwner, defaultBranch, runRange)
+        if (!isRunActive(runId)) {
+          return
+        }
+
+        nextAnalysisDataByRepo[repository.id].commits = commits
+        setRepoDataStatus(repository.id, 'commits', 'done')
+      } catch (error) {
+        commitsStepHasErrors = true
+        hasAnyErrors = true
+        const message = error instanceof Error ? error.message : 'Failed to fetch commits.'
+        setRepoDataStatus(repository.id, 'commits', 'error')
+        addRunError({
+          step: 'commits',
+          repoId: repository.id,
+          repoName: repository.nameWithOwner,
+          dataKey: 'commits',
+          message,
+        })
+      }
+    }
+    setStepStatus('commits', commitsStepHasErrors ? 'error' : 'done')
 
     setActiveStep('aggregate')
     setStepStatus('aggregate', 'fetching')
-    await delay(MOCK_REPO_STEP_DELAY_MS)
     if (!isRunActive(runId)) {
       return
     }
+
+    setAnalysisDataByRepo(nextAnalysisDataByRepo)
     setStepStatus('aggregate', 'done')
 
-    setRunPhase('done')
+    setRunPhase(hasAnyErrors ? 'partial' : 'done')
     setRunFinishedAt(Date.now())
     setActiveStep(null)
     activeRunRef.current = null
@@ -760,6 +1475,9 @@ function App() {
                   setRunErrors([])
                   setRunStartedAt(null)
                   setRunFinishedAt(null)
+                  setLastRunRangeLabel('Last 365 days')
+                  setRateLimitSnapshot(null)
+                  setAnalysisDataByRepo({})
                   setRepoDiscoveryStatus({
                     state: 'idle',
                     message: 'No repositories loaded yet.',
@@ -796,19 +1514,45 @@ function App() {
           <div className="control-grid">
             <label className="control-field">
               <span>Time Range</span>
-              <select defaultValue="365">
+              <select
+                value={timeRangePreset}
+                onChange={(event) => setTimeRangePreset(event.target.value as '30' | '90' | '365' | 'custom')}
+                disabled={isRunInProgress}
+              >
                 <option value="30">Last 30 days</option>
                 <option value="90">Last 90 days</option>
                 <option value="365">Last 365 days</option>
                 <option value="custom">Custom range</option>
               </select>
             </label>
+            {timeRangePreset === 'custom' && (
+              <label className="control-field">
+                <span>Custom Start</span>
+                <input
+                  type="date"
+                  value={customRangeStart}
+                  onChange={(event) => setCustomRangeStart(event.target.value)}
+                  disabled={isRunInProgress}
+                />
+              </label>
+            )}
+            {timeRangePreset === 'custom' && (
+              <label className="control-field">
+                <span>Custom End</span>
+                <input
+                  type="date"
+                  value={customRangeEnd}
+                  onChange={(event) => setCustomRangeEnd(event.target.value)}
+                  disabled={isRunInProgress}
+                />
+              </label>
+            )}
             <label className="control-field">
               <span>Owner Filter</span>
               <select
                 value={ownerFilter}
                 onChange={(event) => setOwnerFilter(event.target.value)}
-                disabled={availableOwners.length === 0}
+                disabled={availableOwners.length === 0 || isRunInProgress}
               >
                 <option value="all">All owners</option>
                 {availableOwners.map((owner) => (
@@ -825,7 +1569,7 @@ function App() {
                 placeholder="Filter discovered repositories by owner/repo"
                 value={repoSearchTerm}
                 onChange={(event) => setRepoSearchTerm(event.target.value)}
-                disabled={discoveredRepos.length === 0}
+                disabled={discoveredRepos.length === 0 || isRunInProgress}
               />
             </label>
             <div className="action-row">
@@ -874,6 +1618,7 @@ function App() {
                         <input
                           type="checkbox"
                           checked={selectedRepoIdSet.has(repo.id)}
+                          disabled={isRunInProgress}
                           onChange={() => handleToggleRepositorySelection(repo.id)}
                         />
                         <span>{repo.nameWithOwner}</span>
@@ -919,7 +1664,21 @@ function App() {
           <p>Progress: {progressPercent}% ({completedStepCount}/{RUN_STEPS.length} steps)</p>
           <p>Active Step: {activeStep ? RUN_STEPS.find((step) => step.key === activeStep)?.label : 'None'}</p>
           <p>Selected Repos: {selectedRepos.length}</p>
+          <p>Loaded Data Repos: {loadedRepoCount}</p>
+          <p>Range: {lastRunRangeLabel}</p>
           <p>Duration: {runDurationMs === null ? '-' : `${Math.max(1, Math.round(runDurationMs / 1000))}s`}</p>
+        </div>
+
+        <div className="rate-limit-panel">
+          <h3>Rate Limit</h3>
+          {rateLimitSnapshot ? (
+            <p>
+              Remaining {rateLimitSnapshot.remaining}/{rateLimitSnapshot.limit} · Used {rateLimitSnapshot.used} ·
+              Reset {new Date(rateLimitSnapshot.resetAt).toLocaleString()}
+            </p>
+          ) : (
+            <p>Rate limit details will appear after GitHub requests start.</p>
+          )}
         </div>
 
         <div className="step-progress-panel">
@@ -971,14 +1730,18 @@ function App() {
             <ul>
               {runErrors.map((errorItem, index) => (
                 <li key={`${errorItem.step}-${errorItem.repoId ?? 'global'}-${index}`}>
-                  <strong>{RUN_STEPS.find((step) => step.key === errorItem.step)?.label}:</strong> {errorItem.message}
+                  <strong>{RUN_STEPS.find((step) => step.key === errorItem.step)?.label}:</strong>{' '}
+                  {errorItem.repoName ? `${errorItem.repoName} · ` : ''}
+                  {errorItem.message}
                 </li>
               ))}
             </ul>
           </div>
         )}
 
-        <p className="endpoint-note">GraphQL endpoint: {GITHUB_GRAPHQL_ENDPOINT}</p>
+        <p className="endpoint-note">
+          GraphQL endpoint: {GITHUB_GRAPHQL_ENDPOINT} · REST endpoint: {GITHUB_REST_ENDPOINT}
+        </p>
       </section>
 
       <main className="dashboard">
