@@ -35,6 +35,7 @@ function readTokenFromStorage(): string {
 function App() {
   const [token, setToken] = useState<string>(() => readTokenFromStorage())
   const [persistToken, setPersistToken] = useState<boolean>(() => readTokenFromStorage().length > 0)
+  const [isTokenHelpOpen, setIsTokenHelpOpen] = useState(false)
   const [tokenStatus, setTokenStatus] = useState<TokenValidationStatus>({
     state: 'idle',
     message: 'Token not validated yet.',
@@ -56,6 +57,23 @@ function App() {
       // Ignore storage write failures; token still remains in memory for this session.
     }
   }, [persistToken, token])
+
+  useEffect(() => {
+    if (!isTokenHelpOpen || typeof window === 'undefined') {
+      return
+    }
+
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setIsTokenHelpOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleEscape)
+    return () => {
+      window.removeEventListener('keydown', handleEscape)
+    }
+  }, [isTokenHelpOpen])
 
   async function handleValidateToken() {
     const trimmedToken = token.trim()
@@ -182,7 +200,12 @@ function App() {
         </div>
 
         <div className="panel auth-panel">
-          <h2>Authentication</h2>
+          <div className="panel-heading">
+            <h2>Authentication</h2>
+            <button type="button" className="text-button" onClick={() => setIsTokenHelpOpen(true)}>
+              How to create token
+            </button>
+          </div>
           <div className="control-grid control-grid--single">
             <label className="control-field control-field--full">
               <span>GitHub Token</span>
@@ -262,6 +285,45 @@ function App() {
           </section>
         ))}
       </main>
+
+      {isTokenHelpOpen && (
+        <div className="modal-backdrop" onClick={() => setIsTokenHelpOpen(false)}>
+          <section
+            className="token-help-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="token-help-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="token-help-header">
+              <h3 id="token-help-title">Create a GitHub token</h3>
+              <button type="button" className="text-button" onClick={() => setIsTokenHelpOpen(false)}>
+                Close
+              </button>
+            </div>
+            <ol className="token-help-list">
+              <li>Open Personal access tokens in GitHub settings.</li>
+              <li>Create a Fine-grained token.</li>
+              <li>Select the owner that contains the repositories you want to analyze.</li>
+              <li>Choose repository access for the repos you want to include.</li>
+              <li>Set read permissions: Metadata, Contents, Pull requests, and Issues.</li>
+              <li>Generate token, copy it once, and paste it into this app.</li>
+            </ol>
+            <p className="token-help-note">
+              Fine-grained tokens are owner-scoped. If you analyze repos across multiple owners, you may need
+              multiple tokens.
+            </p>
+            <a
+              className="token-help-link"
+              href="https://github.com/settings/personal-access-tokens/new"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open GitHub token settings
+            </a>
+          </section>
+        </div>
+      )}
     </div>
   )
 }
