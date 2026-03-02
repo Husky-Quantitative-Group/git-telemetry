@@ -211,6 +211,36 @@ type CommitRecord = {
   authorName?: string
 }
 
+type RawPullRequestRecord = {
+  id?: string
+  number?: number
+  title?: string
+  url?: string
+  createdAt?: string
+  mergedAt?: string
+  isDraft?: boolean
+  authorLogin?: string
+}
+
+type RawIssueRecord = {
+  id?: string
+  number?: number
+  title?: string
+  url?: string
+  createdAt?: string
+  closedAt?: string | null
+  authorLogin?: string
+}
+
+type RawCommitRecord = {
+  oid?: string
+  authoredDate?: string
+  committedDate?: string
+  url?: string
+  authorLogin?: string
+  authorName?: string
+}
+
 type RepoAnalysisData = {
   repoId: string
   repoName: string
@@ -219,6 +249,16 @@ type RepoAnalysisData = {
   issuesOpened: IssueRecord[]
   issuesClosed: IssueRecord[]
   commits: CommitRecord[]
+}
+
+type RepoRawAnalysisData = {
+  repoId: string
+  repoName: string
+  defaultBranch?: string
+  pullRequests: RawPullRequestRecord[]
+  issuesOpened: RawIssueRecord[]
+  issuesClosed: RawIssueRecord[]
+  commits: RawCommitRecord[]
 }
 
 type ViewerValidationData = {
@@ -416,6 +456,137 @@ function getGraphQLRequestError<TData>(
   }
 
   return null
+}
+
+function normalizeText(value: string | null | undefined): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+function normalizeIsoTimestamp(value: string | null | undefined): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+
+  const parsedDate = new Date(value)
+  if (Number.isNaN(parsedDate.valueOf())) {
+    return undefined
+  }
+
+  return parsedDate.toISOString()
+}
+
+function normalizeDefaultBranch(value: string | undefined): string | undefined {
+  return normalizeText(value)
+}
+
+function normalizePullRequestRecords(rawRecords: RawPullRequestRecord[]): PullRequestRecord[] {
+  const normalized: PullRequestRecord[] = []
+  const seenIds = new Set<string>()
+
+  for (const raw of rawRecords) {
+    const id = normalizeText(raw.id)
+    const title = normalizeText(raw.title)
+    const url = normalizeText(raw.url)
+    const createdAt = normalizeIsoTimestamp(raw.createdAt)
+    const mergedAt = normalizeIsoTimestamp(raw.mergedAt)
+    if (
+      !id ||
+      seenIds.has(id) ||
+      raw.number === undefined ||
+      !title ||
+      !url ||
+      !createdAt ||
+      !mergedAt
+    ) {
+      continue
+    }
+
+    normalized.push({
+      id,
+      number: raw.number,
+      title,
+      url,
+      createdAt,
+      mergedAt,
+      isDraft: raw.isDraft ?? false,
+      authorLogin: normalizeText(raw.authorLogin),
+    })
+    seenIds.add(id)
+  }
+
+  return normalized
+}
+
+function normalizeIssueRecords(rawRecords: RawIssueRecord[]): IssueRecord[] {
+  const normalized: IssueRecord[] = []
+  const seenIds = new Set<string>()
+
+  for (const raw of rawRecords) {
+    const id = normalizeText(raw.id)
+    const title = normalizeText(raw.title)
+    const url = normalizeText(raw.url)
+    const createdAt = normalizeIsoTimestamp(raw.createdAt)
+    if (!id || seenIds.has(id) || raw.number === undefined || !title || !url || !createdAt) {
+      continue
+    }
+
+    normalized.push({
+      id,
+      number: raw.number,
+      title,
+      url,
+      createdAt,
+      closedAt: normalizeIsoTimestamp(raw.closedAt) ?? null,
+      authorLogin: normalizeText(raw.authorLogin),
+    })
+    seenIds.add(id)
+  }
+
+  return normalized
+}
+
+function normalizeCommitRecords(rawRecords: RawCommitRecord[]): CommitRecord[] {
+  const normalized: CommitRecord[] = []
+  const seenOids = new Set<string>()
+
+  for (const raw of rawRecords) {
+    const oid = normalizeText(raw.oid)
+    const url = normalizeText(raw.url)
+    const authoredDate = normalizeIsoTimestamp(raw.authoredDate)
+    const committedDate = normalizeIsoTimestamp(raw.committedDate)
+    if (!oid || seenOids.has(oid) || !url || !authoredDate || !committedDate) {
+      continue
+    }
+
+    normalized.push({
+      oid,
+      authoredDate,
+      committedDate,
+      url,
+      authorLogin: normalizeText(raw.authorLogin),
+      authorName: normalizeText(raw.authorName),
+    })
+    seenOids.add(oid)
+  }
+
+  return normalized
+}
+
+function normalizeRepositoryAnalysisData(raw: RepoRawAnalysisData): RepoAnalysisData {
+  return {
+    repoId: raw.repoId,
+    repoName: raw.repoName,
+    defaultBranch: normalizeDefaultBranch(raw.defaultBranch),
+    pullRequests: normalizePullRequestRecords(raw.pullRequests),
+    issuesOpened: normalizeIssueRecords(raw.issuesOpened),
+    issuesClosed: normalizeIssueRecords(raw.issuesClosed),
+    commits: normalizeCommitRecords(raw.commits),
+  }
 }
 
 function readTokenFromStorage(): string {
@@ -989,8 +1160,8 @@ function App() {
     trimmedToken: string,
     repoNameWithOwner: string,
     range: RunDateRange,
-  ): Promise<PullRequestRecord[]> {
-    const pullRequests: PullRequestRecord[] = []
+  ): Promise<RawPullRequestRecord[]> {
+    const pullRequests: RawPullRequestRecord[] = []
     let cursor: string | null = null
     let hasNextPage = true
     const searchQuery = `repo:${repoNameWithOwner} is:pr is:merged merged:${range.startDay}..${range.endDay} sort:updated-desc`
@@ -1016,14 +1187,7 @@ function App() {
 
       const nodes = searchResult.nodes ?? []
       for (const node of nodes) {
-        if (
-          !node?.id ||
-          node.number === undefined ||
-          !node.title ||
-          !node.url ||
-          !node.createdAt ||
-          !node.mergedAt
-        ) {
+        if (!node) {
           continue
         }
 
@@ -1051,8 +1215,8 @@ function App() {
     repoNameWithOwner: string,
     range: RunDateRange,
     mode: 'opened' | 'closed',
-  ): Promise<IssueRecord[]> {
-    const issues: IssueRecord[] = []
+  ): Promise<RawIssueRecord[]> {
+    const issues: RawIssueRecord[] = []
     let cursor: string | null = null
     let hasNextPage = true
     const qualifier =
@@ -1080,7 +1244,7 @@ function App() {
 
       const nodes = searchResult.nodes ?? []
       for (const node of nodes) {
-        if (!node?.id || node.number === undefined || !node.title || !node.url || !node.createdAt) {
+        if (!node) {
           continue
         }
 
@@ -1107,13 +1271,13 @@ function App() {
     repoNameWithOwner: string,
     defaultBranch: string,
     range: RunDateRange,
-  ): Promise<CommitRecord[]> {
+  ): Promise<RawCommitRecord[]> {
     const parsedName = splitRepositoryName(repoNameWithOwner)
     if (!parsedName) {
       throw new Error(`Repository name is invalid: ${repoNameWithOwner}`)
     }
 
-    const commits: CommitRecord[] = []
+    const commits: RawCommitRecord[] = []
     let cursor: string | null = null
     let hasNextPage = true
     const qualifiedName = `refs/heads/${defaultBranch}`
@@ -1143,7 +1307,7 @@ function App() {
 
       const nodes = history.nodes ?? []
       for (const node of nodes) {
-        if (!node?.oid || !node.authoredDate || !node.committedDate || !node.url) {
+        if (!node) {
           continue
         }
 
@@ -1197,9 +1361,9 @@ function App() {
     activeRunRef.current = runId
     const runStarted = Date.now()
     let hasAnyErrors = false
-    const nextAnalysisDataByRepo: Record<string, RepoAnalysisData> = {}
+    const nextRawAnalysisByRepo: Record<string, RepoRawAnalysisData> = {}
     for (const repository of selectedRepos) {
-      nextAnalysisDataByRepo[repository.id] = {
+      nextRawAnalysisByRepo[repository.id] = {
         repoId: repository.id,
         repoName: repository.nameWithOwner,
         pullRequests: [],
@@ -1270,7 +1434,7 @@ function App() {
           return
         }
 
-        nextAnalysisDataByRepo[repository.id].defaultBranch = defaultBranch
+        nextRawAnalysisByRepo[repository.id].defaultBranch = defaultBranch
         setRepoDataStatus(repository.id, 'defaultBranch', 'done')
       } catch (error) {
         repoPrepHasErrors = true
@@ -1303,7 +1467,7 @@ function App() {
           return
         }
 
-        nextAnalysisDataByRepo[repository.id].pullRequests = pullRequests
+        nextRawAnalysisByRepo[repository.id].pullRequests = pullRequests
         setRepoDataStatus(repository.id, 'prs', 'done')
       } catch (error) {
         prStepHasErrors = true
@@ -1340,8 +1504,8 @@ function App() {
           return
         }
 
-        nextAnalysisDataByRepo[repository.id].issuesOpened = openedIssues
-        nextAnalysisDataByRepo[repository.id].issuesClosed = closedIssues
+        nextRawAnalysisByRepo[repository.id].issuesOpened = openedIssues
+        nextRawAnalysisByRepo[repository.id].issuesClosed = closedIssues
         setRepoDataStatus(repository.id, 'issues', 'done')
       } catch (error) {
         issuesStepHasErrors = true
@@ -1368,7 +1532,7 @@ function App() {
       }
 
       setRepoDataStatus(repository.id, 'commits', 'fetching')
-      const defaultBranch = nextAnalysisDataByRepo[repository.id].defaultBranch
+      const defaultBranch = nextRawAnalysisByRepo[repository.id].defaultBranch
       if (!defaultBranch) {
         commitsStepHasErrors = true
         hasAnyErrors = true
@@ -1389,7 +1553,7 @@ function App() {
           return
         }
 
-        nextAnalysisDataByRepo[repository.id].commits = commits
+        nextRawAnalysisByRepo[repository.id].commits = commits
         setRepoDataStatus(repository.id, 'commits', 'done')
       } catch (error) {
         commitsStepHasErrors = true
@@ -1413,7 +1577,17 @@ function App() {
       return
     }
 
-    setAnalysisDataByRepo(nextAnalysisDataByRepo)
+    const normalizedAnalysisByRepo: Record<string, RepoAnalysisData> = {}
+    for (const repository of selectedRepos) {
+      const rawRepoData = nextRawAnalysisByRepo[repository.id]
+      if (!rawRepoData) {
+        continue
+      }
+
+      normalizedAnalysisByRepo[repository.id] = normalizeRepositoryAnalysisData(rawRepoData)
+    }
+
+    setAnalysisDataByRepo(normalizedAnalysisByRepo)
     setStepStatus('aggregate', 'done')
 
     setRunPhase(hasAnyErrors ? 'partial' : 'done')
