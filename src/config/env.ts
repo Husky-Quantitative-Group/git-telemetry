@@ -1,0 +1,4 @@
+const DEFAULT_GITHUB_GRAPHQL_ENDPOINT = 'https://api.github.com/graphql'
+
+export const GITHUB_GRAPHQL_ENDPOINT =
+  import.meta.env.VITE_GITHUB_GRAPHQL_ENDPOINT ?? DEFAULT_GITHUB_GRAPHQL_ENDPOINT
