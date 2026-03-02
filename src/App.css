@@ -87,6 +87,18 @@
   font-size: 0.95rem;
 }
 
+.remember-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.remember-toggle input {
+  accent-color: var(--action);
+}
+
 .action-row {
   grid-column: 1 / -1;
   display: flex;
@@ -105,10 +117,41 @@
   color: var(--text-primary);
 }
 
+.action-row button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .action-row .button-primary {
   border-color: transparent;
   background: var(--action);
   color: #fff;
+}
+
+.token-status {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.token-status--idle {
+  color: var(--text-secondary);
+}
+
+.token-status--validating {
+  color: #8b651b;
+}
+
+.token-status--valid {
+  color: #1f7a3a;
+}
+
+.token-status--invalid {
+  color: #932f2f;
+}
+
+.token-status--error {
+  color: #994d1a;
 }
 
 .status-panel {
