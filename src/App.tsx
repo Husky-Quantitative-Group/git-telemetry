@@ -261,6 +261,52 @@ type RepoRawAnalysisData = {
   commits: RawCommitRecord[]
 }
 
+type AggregationGranularity = 'daily' | 'weekly' | 'monthly'
+type AggregationScope = 'selected' | 'loaded'
+
+type AggregatedBucketPoint = {
+  bucketStart: string
+  bucketLabel: string
+  total: number
+  byRepo: Record<string, number>
+}
+
+type AggregatedRepoTotals = {
+  repoId: string
+  repoName: string
+  commits: number
+  prsMerged: number
+  issuesOpened: number
+  issuesClosed: number
+  mergeTimeCount: number
+  mergeTimeAverageHours: number | null
+  mergeTimeMedianHours: number | null
+}
+
+type AggregatedActivity = {
+  range: RunDateRange
+  granularity: AggregationGranularity
+  repoIds: string[]
+  totals: {
+    commits: number
+    prsMerged: number
+    issuesOpened: number
+    issuesClosed: number
+  }
+  mergeTime: {
+    count: number
+    averageHours: number | null
+    medianHours: number | null
+  }
+  series: {
+    commits: AggregatedBucketPoint[]
+    prsMerged: AggregatedBucketPoint[]
+    issuesOpened: AggregatedBucketPoint[]
+    issuesClosed: AggregatedBucketPoint[]
+  }
+  perRepoTotals: AggregatedRepoTotals[]
+}
+
 type ViewerValidationData = {
   viewer?: {
     login?: string
@@ -589,6 +635,272 @@ function normalizeRepositoryAnalysisData(raw: RepoRawAnalysisData): RepoAnalysis
   }
 }
 
+function getBucketStartDate(timestampIso: string, granularity: AggregationGranularity): Date | null {
+  const parsedDate = new Date(timestampIso)
+  if (Number.isNaN(parsedDate.valueOf())) {
+    return null
+  }
+
+  const bucketDate = new Date(Date.UTC(parsedDate.getUTCFullYear(), parsedDate.getUTCMonth(), parsedDate.getUTCDate()))
+  if (granularity === 'weekly') {
+    const dayOffsetFromMonday = (bucketDate.getUTCDay() + 6) % 7
+    bucketDate.setUTCDate(bucketDate.getUTCDate() - dayOffsetFromMonday)
+  } else if (granularity === 'monthly') {
+    bucketDate.setUTCDate(1)
+  }
+
+  return bucketDate
+}
+
+function incrementBucketDate(bucketDate: Date, granularity: AggregationGranularity): Date {
+  const next = new Date(bucketDate.getTime())
+  if (granularity === 'daily') {
+    next.setUTCDate(next.getUTCDate() + 1)
+  } else if (granularity === 'weekly') {
+    next.setUTCDate(next.getUTCDate() + 7)
+  } else {
+    next.setUTCMonth(next.getUTCMonth() + 1)
+    next.setUTCDate(1)
+  }
+
+  return next
+}
+
+function formatBucketLabel(bucketStartIso: string, granularity: AggregationGranularity): string {
+  if (granularity === 'daily') {
+    return bucketStartIso.slice(0, 10)
+  }
+
+  if (granularity === 'weekly') {
+    return `Week of ${bucketStartIso.slice(0, 10)}`
+  }
+
+  return bucketStartIso.slice(0, 7)
+}
+
+function createBucketTimeline(range: RunDateRange, granularity: AggregationGranularity): string[] {
+  const timeline: string[] = []
+  const startBucketDate = getBucketStartDate(range.startIso, granularity)
+  if (!startBucketDate) {
+    return timeline
+  }
+
+  const rangeEndTime = new Date(range.endIso).valueOf()
+  let cursor = startBucketDate
+  while (cursor.valueOf() <= rangeEndTime) {
+    timeline.push(cursor.toISOString())
+    cursor = incrementBucketDate(cursor, granularity)
+  }
+
+  return timeline
+}
+
+function calculateAverage(values: number[]): number | null {
+  if (values.length === 0) {
+    return null
+  }
+
+  const sum = values.reduce((accumulator, value) => accumulator + value, 0)
+  return sum / values.length
+}
+
+function calculateMedian(values: number[]): number | null {
+  if (values.length === 0) {
+    return null
+  }
+
+  const sorted = [...values].sort((left, right) => left - right)
+  const middleIndex = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 0) {
+    return (sorted[middleIndex - 1] + sorted[middleIndex]) / 2
+  }
+
+  return sorted[middleIndex]
+}
+
+function aggregateRepositoryActivity(
+  analysisByRepo: Record<string, RepoAnalysisData>,
+  repoIds: string[],
+  range: RunDateRange,
+  granularity: AggregationGranularity,
+): AggregatedActivity {
+  const bucketTimeline = createBucketTimeline(range, granularity)
+  const bucketPointMap = {
+    commits: new Map<string, AggregatedBucketPoint>(),
+    prsMerged: new Map<string, AggregatedBucketPoint>(),
+    issuesOpened: new Map<string, AggregatedBucketPoint>(),
+    issuesClosed: new Map<string, AggregatedBucketPoint>(),
+  }
+
+  for (const bucketStart of bucketTimeline) {
+    const pointBase = {
+      bucketStart,
+      bucketLabel: formatBucketLabel(bucketStart, granularity),
+      total: 0,
+      byRepo: {} as Record<string, number>,
+    }
+    bucketPointMap.commits.set(bucketStart, { ...pointBase, byRepo: {} })
+    bucketPointMap.prsMerged.set(bucketStart, { ...pointBase, byRepo: {} })
+    bucketPointMap.issuesOpened.set(bucketStart, { ...pointBase, byRepo: {} })
+    bucketPointMap.issuesClosed.set(bucketStart, { ...pointBase, byRepo: {} })
+  }
+
+  const rangeStartTime = new Date(range.startIso).valueOf()
+  const rangeEndTime = new Date(range.endIso).valueOf()
+  const globalMergeDurations: number[] = []
+  const perRepoTotals: AggregatedRepoTotals[] = []
+
+  function addToBucket(
+    bucketMap: Map<string, AggregatedBucketPoint>,
+    bucketIso: string,
+    repoId: string,
+    incrementBy: number,
+  ) {
+    const bucketPoint = bucketMap.get(bucketIso)
+    if (!bucketPoint) {
+      return
+    }
+
+    bucketPoint.total += incrementBy
+    bucketPoint.byRepo[repoId] = (bucketPoint.byRepo[repoId] ?? 0) + incrementBy
+  }
+
+  for (const repoId of repoIds) {
+    const repoData = analysisByRepo[repoId]
+    if (!repoData) {
+      continue
+    }
+
+    let repoCommits = 0
+    let repoPrsMerged = 0
+    let repoIssuesOpened = 0
+    let repoIssuesClosed = 0
+    const repoMergeDurations: number[] = []
+
+    for (const commit of repoData.commits) {
+      const commitTime = new Date(commit.authoredDate).valueOf()
+      if (Number.isNaN(commitTime) || commitTime < rangeStartTime || commitTime > rangeEndTime) {
+        continue
+      }
+
+      const bucketStartDate = getBucketStartDate(commit.authoredDate, granularity)
+      if (!bucketStartDate) {
+        continue
+      }
+
+      addToBucket(bucketPointMap.commits, bucketStartDate.toISOString(), repoId, 1)
+      repoCommits += 1
+    }
+
+    for (const pullRequest of repoData.pullRequests) {
+      const mergedTime = new Date(pullRequest.mergedAt).valueOf()
+      if (Number.isNaN(mergedTime) || mergedTime < rangeStartTime || mergedTime > rangeEndTime) {
+        continue
+      }
+
+      const bucketStartDate = getBucketStartDate(pullRequest.mergedAt, granularity)
+      if (!bucketStartDate) {
+        continue
+      }
+
+      addToBucket(bucketPointMap.prsMerged, bucketStartDate.toISOString(), repoId, 1)
+      repoPrsMerged += 1
+
+      const createdTime = new Date(pullRequest.createdAt).valueOf()
+      if (!Number.isNaN(createdTime) && mergedTime > createdTime) {
+        const durationHours = (mergedTime - createdTime) / (1000 * 60 * 60)
+        repoMergeDurations.push(durationHours)
+        globalMergeDurations.push(durationHours)
+      }
+    }
+
+    for (const openedIssue of repoData.issuesOpened) {
+      const openedTime = new Date(openedIssue.createdAt).valueOf()
+      if (Number.isNaN(openedTime) || openedTime < rangeStartTime || openedTime > rangeEndTime) {
+        continue
+      }
+
+      const bucketStartDate = getBucketStartDate(openedIssue.createdAt, granularity)
+      if (!bucketStartDate) {
+        continue
+      }
+
+      addToBucket(bucketPointMap.issuesOpened, bucketStartDate.toISOString(), repoId, 1)
+      repoIssuesOpened += 1
+    }
+
+    for (const closedIssue of repoData.issuesClosed) {
+      if (!closedIssue.closedAt) {
+        continue
+      }
+
+      const closedTime = new Date(closedIssue.closedAt).valueOf()
+      if (Number.isNaN(closedTime) || closedTime < rangeStartTime || closedTime > rangeEndTime) {
+        continue
+      }
+
+      const bucketStartDate = getBucketStartDate(closedIssue.closedAt, granularity)
+      if (!bucketStartDate) {
+        continue
+      }
+
+      addToBucket(bucketPointMap.issuesClosed, bucketStartDate.toISOString(), repoId, 1)
+      repoIssuesClosed += 1
+    }
+
+    perRepoTotals.push({
+      repoId,
+      repoName: repoData.repoName,
+      commits: repoCommits,
+      prsMerged: repoPrsMerged,
+      issuesOpened: repoIssuesOpened,
+      issuesClosed: repoIssuesClosed,
+      mergeTimeCount: repoMergeDurations.length,
+      mergeTimeAverageHours: calculateAverage(repoMergeDurations),
+      mergeTimeMedianHours: calculateMedian(repoMergeDurations),
+    })
+  }
+
+  perRepoTotals.sort((left, right) => left.repoName.localeCompare(right.repoName))
+
+  const commitsSeries = bucketTimeline
+    .map((bucketStart) => bucketPointMap.commits.get(bucketStart))
+    .filter((point): point is AggregatedBucketPoint => point !== undefined)
+  const prsMergedSeries = bucketTimeline
+    .map((bucketStart) => bucketPointMap.prsMerged.get(bucketStart))
+    .filter((point): point is AggregatedBucketPoint => point !== undefined)
+  const issuesOpenedSeries = bucketTimeline
+    .map((bucketStart) => bucketPointMap.issuesOpened.get(bucketStart))
+    .filter((point): point is AggregatedBucketPoint => point !== undefined)
+  const issuesClosedSeries = bucketTimeline
+    .map((bucketStart) => bucketPointMap.issuesClosed.get(bucketStart))
+    .filter((point): point is AggregatedBucketPoint => point !== undefined)
+
+  return {
+    range,
+    granularity,
+    repoIds,
+    totals: {
+      commits: commitsSeries.reduce((accumulator, point) => accumulator + point.total, 0),
+      prsMerged: prsMergedSeries.reduce((accumulator, point) => accumulator + point.total, 0),
+      issuesOpened: issuesOpenedSeries.reduce((accumulator, point) => accumulator + point.total, 0),
+      issuesClosed: issuesClosedSeries.reduce((accumulator, point) => accumulator + point.total, 0),
+    },
+    mergeTime: {
+      count: globalMergeDurations.length,
+      averageHours: calculateAverage(globalMergeDurations),
+      medianHours: calculateMedian(globalMergeDurations),
+    },
+    series: {
+      commits: commitsSeries,
+      prsMerged: prsMergedSeries,
+      issuesOpened: issuesOpenedSeries,
+      issuesClosed: issuesClosedSeries,
+    },
+    perRepoTotals,
+  }
+}
+
 function readTokenFromStorage(): string {
   if (typeof window === 'undefined') {
     return ''
@@ -658,7 +970,10 @@ function App() {
   const [runErrors, setRunErrors] = useState<RunErrorItem[]>([])
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
   const [runFinishedAt, setRunFinishedAt] = useState<number | null>(null)
+  const [lastRunRange, setLastRunRange] = useState<RunDateRange | null>(null)
   const [lastRunRangeLabel, setLastRunRangeLabel] = useState<string>('Last 365 days')
+  const [aggregationGranularity, setAggregationGranularity] = useState<AggregationGranularity>('weekly')
+  const [aggregationScope, setAggregationScope] = useState<AggregationScope>('selected')
   const [rateLimitSnapshot, setRateLimitSnapshot] = useState<RateLimitSnapshot | null>(null)
   const [analysisDataByRepo, setAnalysisDataByRepo] = useState<Record<string, RepoAnalysisData>>({})
   const runSequenceRef = useRef(0)
@@ -986,6 +1301,7 @@ function App() {
     setRunErrors([])
     setRunStartedAt(null)
     setRunFinishedAt(null)
+    setLastRunRange(null)
     setLastRunRangeLabel('Last 365 days')
     setRateLimitSnapshot(null)
     setAnalysisDataByRepo({})
@@ -1067,6 +1383,26 @@ function App() {
   const runPhaseClassName = `run-phase-badge run-phase-badge--${runPhase}`
   const rerunButtonLabel = runPhase === 'idle' ? 'Start Run' : 'Retry Run'
   const loadedRepoCount = Object.keys(analysisDataByRepo).length
+  const loadedRepoIds = useMemo(() => Object.keys(analysisDataByRepo), [analysisDataByRepo])
+  const aggregationRepoIds = useMemo(() => {
+    if (aggregationScope === 'loaded') {
+      return loadedRepoIds
+    }
+
+    const selectedLoaded = selectedRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+    if (selectedLoaded.length > 0) {
+      return selectedLoaded
+    }
+
+    return loadedRepoIds
+  }, [aggregationScope, loadedRepoIds, selectedRepoIds, analysisDataByRepo])
+  const aggregatedActivity = useMemo(() => {
+    if (!lastRunRange || aggregationRepoIds.length === 0) {
+      return null
+    }
+
+    return aggregateRepositoryActivity(analysisDataByRepo, aggregationRepoIds, lastRunRange, aggregationGranularity)
+  }, [analysisDataByRepo, aggregationGranularity, aggregationRepoIds, lastRunRange])
 
   function handleToggleRepositorySelection(repoId: string) {
     setSelectedRepoIds((previous) => {
@@ -1379,6 +1715,7 @@ function App() {
     setRunErrors([])
     setRunStartedAt(runStarted)
     setRunFinishedAt(null)
+    setLastRunRange(runRange)
     setLastRunRangeLabel(runRange.label)
     setStepStatuses(createStepStatusMap('queued'))
     setAnalysisDataByRepo({})
@@ -1649,6 +1986,7 @@ function App() {
                   setRunErrors([])
                   setRunStartedAt(null)
                   setRunFinishedAt(null)
+                  setLastRunRange(null)
                   setLastRunRangeLabel('Last 365 days')
                   setRateLimitSnapshot(null)
                   setAnalysisDataByRepo({})
@@ -1852,6 +2190,87 @@ function App() {
             </p>
           ) : (
             <p>Rate limit details will appear after GitHub requests start.</p>
+          )}
+        </div>
+
+        <div className="aggregation-preview-panel">
+          <div className="aggregation-preview-header">
+            <h3>Aggregation Preview</h3>
+            <div className="aggregation-controls">
+              <label>
+                Granularity
+                <select
+                  value={aggregationGranularity}
+                  onChange={(event) => setAggregationGranularity(event.target.value as AggregationGranularity)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <label>
+                Repo Scope
+                <select
+                  value={aggregationScope}
+                  onChange={(event) => setAggregationScope(event.target.value as AggregationScope)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="selected">Selected repos</option>
+                  <option value="loaded">All loaded repos</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          {aggregatedActivity ? (
+            <>
+              <div className="aggregation-summary-grid">
+                <p>Scope repos: {aggregatedActivity.repoIds.length}</p>
+                <p>Commits: {aggregatedActivity.totals.commits}</p>
+                <p>PRs merged: {aggregatedActivity.totals.prsMerged}</p>
+                <p>Issues opened: {aggregatedActivity.totals.issuesOpened}</p>
+                <p>Issues closed: {aggregatedActivity.totals.issuesClosed}</p>
+                <p>
+                  Merge time avg/median:{' '}
+                  {aggregatedActivity.mergeTime.averageHours === null
+                    ? '-'
+                    : `${aggregatedActivity.mergeTime.averageHours.toFixed(1)}h`}
+                  {' / '}
+                  {aggregatedActivity.mergeTime.medianHours === null
+                    ? '-'
+                    : `${aggregatedActivity.mergeTime.medianHours.toFixed(1)}h`}
+                </p>
+              </div>
+              <div className="aggregation-bucket-preview">
+                <h4>Recent Buckets (Commits / PRs / Issues Opened / Issues Closed)</h4>
+                {aggregatedActivity.series.commits.length === 0 ? (
+                  <p>No buckets in selected range.</p>
+                ) : (
+                  <ul>
+                    {aggregatedActivity.series.commits.slice(-5).map((commitPoint) => {
+                      const prPoint = aggregatedActivity.series.prsMerged.find(
+                        (seriesPoint) => seriesPoint.bucketStart === commitPoint.bucketStart,
+                      )
+                      const openedPoint = aggregatedActivity.series.issuesOpened.find(
+                        (seriesPoint) => seriesPoint.bucketStart === commitPoint.bucketStart,
+                      )
+                      const closedPoint = aggregatedActivity.series.issuesClosed.find(
+                        (seriesPoint) => seriesPoint.bucketStart === commitPoint.bucketStart,
+                      )
+
+                      return (
+                        <li key={commitPoint.bucketStart}>
+                          {commitPoint.bucketLabel}: {commitPoint.total} / {prPoint?.total ?? 0} /{' '}
+                          {openedPoint?.total ?? 0} / {closedPoint?.total ?? 0}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="aggregation-empty">Run analysis successfully to generate aggregated series.</p>
           )}
         </div>
 
