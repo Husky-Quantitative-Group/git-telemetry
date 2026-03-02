@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { GITHUB_GRAPHQL_ENDPOINT, GITHUB_REST_ENDPOINT } from './config/env'
 import './App.css'
 
-const DASHBOARD_SECTIONS = ['Commits', 'Pull Requests', 'Issues', 'Cycle Time']
 const TOKEN_STORAGE_KEY = 'gitTelemetry.githubToken'
 const VIEWER_QUERY = `
   query ViewerValidation {
@@ -25,6 +25,7 @@ const REPO_DATA_COLUMNS = [
   { key: 'issues', label: 'Issues' },
   { key: 'commits', label: 'Commits' },
 ] as const
+const CHART_COLORS = ['#1f7a3a', '#2f8f57', '#1f5d8b', '#8b651b', '#9a3f2f', '#5f4ca1', '#0e7490', '#6b8e23']
 const REPOSITORY_DEFAULT_BRANCH_QUERY = `
   query RepositoryDefaultBranch($owner: String!, $name: String!) {
     repository(owner: $owner, name: $name) {
@@ -263,6 +264,8 @@ type RepoRawAnalysisData = {
 
 type AggregationGranularity = 'daily' | 'weekly' | 'monthly'
 type AggregationScope = 'selected' | 'loaded'
+type CommitsChartScopeMode = 'all' | 'multi' | 'single'
+type CommitsChartSeriesMode = 'aggregate' | 'byRepo'
 
 type AggregatedBucketPoint = {
   bucketStart: string
@@ -901,6 +904,79 @@ function aggregateRepositoryActivity(
   }
 }
 
+type CommitsChartLine = {
+  dataKey: string
+  label: string
+  color: string
+}
+
+type CommitsChartDatum = {
+  bucketStart: string
+  bucketLabel: string
+  total: number
+  [repoSeriesKey: string]: number | string
+}
+
+function CommitsLineChart({
+  data,
+  seriesMode,
+  lines,
+}: {
+  data: CommitsChartDatum[]
+  seriesMode: CommitsChartSeriesMode
+  lines: CommitsChartLine[]
+}) {
+  if (data.length === 0) {
+    return <p className="commits-chart-empty">No commit buckets in this range.</p>
+  }
+
+  const hasPerRepoLines = lines.length > 0
+  if (seriesMode === 'byRepo' && !hasPerRepoLines) {
+    return <p className="commits-chart-empty">No repositories available for per-repo commit series.</p>
+  }
+
+  return (
+    <div className="commits-chart-canvas">
+      <ResponsiveContainer width="100%" height={320}>
+        <LineChart data={data} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
+          <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
+          <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
+          <Tooltip
+            contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
+            labelStyle={{ color: '#16210e', fontWeight: 700 }}
+          />
+          <Legend />
+          {seriesMode === 'aggregate' ? (
+            <Line
+              type="monotone"
+              dataKey="total"
+              name="Total commits"
+              stroke="#1f7a3a"
+              strokeWidth={2}
+              dot={false}
+              activeDot={{ r: 5 }}
+            />
+          ) : (
+            lines.map((lineConfig) => (
+              <Line
+                key={lineConfig.dataKey}
+                type="monotone"
+                dataKey={lineConfig.dataKey}
+                name={lineConfig.label}
+                stroke={lineConfig.color}
+                strokeWidth={2}
+                dot={false}
+                activeDot={{ r: 4 }}
+              />
+            ))
+          )}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
 function readTokenFromStorage(): string {
   if (typeof window === 'undefined') {
     return ''
@@ -974,6 +1050,11 @@ function App() {
   const [lastRunRangeLabel, setLastRunRangeLabel] = useState<string>('Last 365 days')
   const [aggregationGranularity, setAggregationGranularity] = useState<AggregationGranularity>('weekly')
   const [aggregationScope, setAggregationScope] = useState<AggregationScope>('selected')
+  const [commitsChartGranularity, setCommitsChartGranularity] = useState<AggregationGranularity>('weekly')
+  const [commitsChartScopeMode, setCommitsChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [commitsChartSeriesMode, setCommitsChartSeriesMode] = useState<CommitsChartSeriesMode>('aggregate')
+  const [commitsChartSingleRepoId, setCommitsChartSingleRepoId] = useState('')
+  const [commitsChartMultiRepoIds, setCommitsChartMultiRepoIds] = useState<string[]>([])
   const [rateLimitSnapshot, setRateLimitSnapshot] = useState<RateLimitSnapshot | null>(null)
   const [analysisDataByRepo, setAnalysisDataByRepo] = useState<Record<string, RepoAnalysisData>>({})
   const runSequenceRef = useRef(0)
@@ -1303,6 +1384,11 @@ function App() {
     setRunFinishedAt(null)
     setLastRunRange(null)
     setLastRunRangeLabel('Last 365 days')
+    setCommitsChartGranularity('weekly')
+    setCommitsChartScopeMode('all')
+    setCommitsChartSeriesMode('aggregate')
+    setCommitsChartSingleRepoId('')
+    setCommitsChartMultiRepoIds([])
     setRateLimitSnapshot(null)
     setAnalysisDataByRepo({})
     setRepoDiscoveryStatus({
@@ -1384,6 +1470,22 @@ function App() {
   const rerunButtonLabel = runPhase === 'idle' ? 'Start Run' : 'Retry Run'
   const loadedRepoCount = Object.keys(analysisDataByRepo).length
   const loadedRepoIds = useMemo(() => Object.keys(analysisDataByRepo), [analysisDataByRepo])
+  const loadedRepoOptions = useMemo(
+    () =>
+      loadedRepoIds
+        .map((repoId) => {
+          const repoData = analysisDataByRepo[repoId]
+          return repoData
+            ? {
+                repoId,
+                repoName: repoData.repoName,
+              }
+            : null
+        })
+        .filter((repoOption): repoOption is { repoId: string; repoName: string } => repoOption !== null)
+        .sort((left, right) => left.repoName.localeCompare(right.repoName)),
+    [analysisDataByRepo, loadedRepoIds],
+  )
   const aggregationRepoIds = useMemo(() => {
     if (aggregationScope === 'loaded') {
       return loadedRepoIds
@@ -1403,6 +1505,78 @@ function App() {
 
     return aggregateRepositoryActivity(analysisDataByRepo, aggregationRepoIds, lastRunRange, aggregationGranularity)
   }, [analysisDataByRepo, aggregationGranularity, aggregationRepoIds, lastRunRange])
+  const commitsChartRepoIds = useMemo(() => {
+    const effectiveSingleRepoId =
+      commitsChartSingleRepoId.length > 0 && analysisDataByRepo[commitsChartSingleRepoId]
+        ? commitsChartSingleRepoId
+        : loadedRepoIds[0]
+    const effectiveMultiRepoIds = commitsChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+
+    if (commitsChartScopeMode === 'single') {
+      if (effectiveSingleRepoId) {
+        return [effectiveSingleRepoId]
+      }
+
+      return []
+    }
+
+    if (commitsChartScopeMode === 'multi') {
+      return effectiveMultiRepoIds.length > 0 ? effectiveMultiRepoIds : loadedRepoIds
+    }
+
+    return loadedRepoIds
+  }, [
+    analysisDataByRepo,
+    commitsChartMultiRepoIds,
+    commitsChartScopeMode,
+    commitsChartSingleRepoId,
+    loadedRepoIds,
+  ])
+  const commitsChartAggregation = useMemo(() => {
+    if (!lastRunRange || commitsChartRepoIds.length === 0) {
+      return null
+    }
+
+    return aggregateRepositoryActivity(analysisDataByRepo, commitsChartRepoIds, lastRunRange, commitsChartGranularity)
+  }, [analysisDataByRepo, commitsChartGranularity, commitsChartRepoIds, lastRunRange])
+  const commitsChartData = useMemo(() => {
+    if (!commitsChartAggregation) {
+      return [] as CommitsChartDatum[]
+    }
+
+    return commitsChartAggregation.series.commits.map((point) => {
+      const chartPoint: CommitsChartDatum = {
+        bucketStart: point.bucketStart,
+        bucketLabel: point.bucketLabel,
+        total: point.total,
+      }
+
+      for (const repoId of commitsChartAggregation.repoIds) {
+        const key = `repo:${repoId}`
+        chartPoint[key] = point.byRepo[repoId] ?? 0
+      }
+
+      return chartPoint
+    })
+  }, [commitsChartAggregation])
+  const commitsChartLines = useMemo(() => {
+    if (!commitsChartAggregation) {
+      return [] as CommitsChartLine[]
+    }
+
+    return commitsChartAggregation.repoIds.map((repoId, index) => ({
+      dataKey: `repo:${repoId}`,
+      label: analysisDataByRepo[repoId]?.repoName ?? repoId,
+      color: CHART_COLORS[index % CHART_COLORS.length],
+    }))
+  }, [analysisDataByRepo, commitsChartAggregation])
+  const commitsChartSingleRepoValue =
+    commitsChartSingleRepoId.length > 0 && analysisDataByRepo[commitsChartSingleRepoId]
+      ? commitsChartSingleRepoId
+      : loadedRepoIds[0] ?? ''
+  const commitsChartMultiRepoValue = commitsChartMultiRepoIds.filter(
+    (repoId) => analysisDataByRepo[repoId] !== undefined,
+  )
 
   function handleToggleRepositorySelection(repoId: string) {
     setSelectedRepoIds((previous) => {
@@ -1988,6 +2162,11 @@ function App() {
                   setRunFinishedAt(null)
                   setLastRunRange(null)
                   setLastRunRangeLabel('Last 365 days')
+                  setCommitsChartGranularity('weekly')
+                  setCommitsChartScopeMode('all')
+                  setCommitsChartSeriesMode('aggregate')
+                  setCommitsChartSingleRepoId('')
+                  setCommitsChartMultiRepoIds([])
                   setRateLimitSnapshot(null)
                   setAnalysisDataByRepo({})
                   setRepoDiscoveryStatus({
@@ -2338,7 +2517,112 @@ function App() {
       </section>
 
       <main className="dashboard">
-        {DASHBOARD_SECTIONS.map((section) => (
+        <section className="panel dashboard-section" key="Commits">
+          <div className="dashboard-section-header">
+            <h2>Commits</h2>
+            <div className="chart-control-bar">
+              <label>
+                Granularity
+                <select
+                  value={commitsChartGranularity}
+                  onChange={(event) => setCommitsChartGranularity(event.target.value as AggregationGranularity)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <label>
+                Scope
+                <select
+                  value={commitsChartScopeMode}
+                  onChange={(event) => setCommitsChartScopeMode(event.target.value as CommitsChartScopeMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="all">All loaded repos</option>
+                  <option value="multi">Multi-select repos</option>
+                  <option value="single">Single repo</option>
+                </select>
+              </label>
+              <label>
+                Series
+                <select
+                  value={commitsChartSeriesMode}
+                  onChange={(event) => setCommitsChartSeriesMode(event.target.value as CommitsChartSeriesMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Aggregate line</option>
+                  <option value="byRepo">Per-repo lines</option>
+                </select>
+              </label>
+              {commitsChartScopeMode === 'single' && (
+                <label>
+                  Repo
+                  <select
+                    value={commitsChartSingleRepoValue}
+                    onChange={(event) => setCommitsChartSingleRepoId(event.target.value)}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {commitsChartScopeMode === 'multi' && (
+                <label>
+                  Repo Set
+                  <select
+                    multiple
+                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
+                    value={commitsChartMultiRepoValue}
+                    onChange={(event) => {
+                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
+                      setCommitsChartMultiRepoIds(selectedValues)
+                    }}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          </div>
+          {commitsChartAggregation ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <p>Total Commits</p>
+                  <strong>{commitsChartAggregation.totals.commits}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Repo Scope</p>
+                  <strong>{commitsChartAggregation.repoIds.length}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Bucket Count</p>
+                  <strong>{commitsChartAggregation.series.commits.length}</strong>
+                </div>
+              </div>
+              <CommitsLineChart
+                data={commitsChartData}
+                seriesMode={commitsChartSeriesMode}
+                lines={commitsChartLines}
+              />
+            </>
+          ) : (
+            <div className="chart-placeholder">Run analysis to generate commit charts.</div>
+          )}
+        </section>
+
+        {['Pull Requests', 'Issues', 'Cycle Time'].map((section) => (
           <section className="panel dashboard-section" key={section}>
             <h2>{section}</h2>
             <p>Charts and controls will be added in upcoming checkpoints.</p>

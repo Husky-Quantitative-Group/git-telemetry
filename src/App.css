@@ -596,6 +596,80 @@
   color: var(--text-secondary);
 }
 
+.dashboard-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.8rem;
+}
+
+.chart-control-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.chart-control-bar label {
+  display: grid;
+  gap: 0.2rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.chart-control-bar select {
+  min-height: 32px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text-primary);
+  padding: 0.2rem 0.45rem;
+}
+
+.chart-control-bar select[multiple] {
+  min-height: 72px;
+}
+
+.stats-grid {
+  margin-top: 0.75rem;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.stat-card {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0.55rem 0.6rem;
+}
+
+.stat-card p {
+  margin: 0;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.stat-card strong {
+  display: inline-block;
+  margin-top: 0.2rem;
+  font-size: 1.15rem;
+}
+
+.commits-chart-canvas {
+  margin-top: 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: #fff;
+  padding: 0.65rem;
+}
+
+.commits-chart-empty {
+  margin: 0.75rem 0 0;
+  color: var(--text-secondary);
+}
+
 .chart-placeholder {
   margin-top: 0.75rem;
   border-radius: 12px;
@@ -672,6 +746,14 @@
   }
 
   .run-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-section-header {
+    flex-direction: column;
+  }
+
+  .stats-grid {
     grid-template-columns: 1fr;
   }
 
