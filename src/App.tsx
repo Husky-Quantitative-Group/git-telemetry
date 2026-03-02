@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { GITHUB_GRAPHQL_ENDPOINT, GITHUB_REST_ENDPOINT } from './config/env'
 import './App.css'
 
@@ -11,9 +11,28 @@ const VIEWER_QUERY = `
     }
   }
 `
+const RUN_STEPS = [
+  { key: 'tokenCheck', label: 'Token Check' },
+  { key: 'repoPrep', label: 'Repo Prep' },
+  { key: 'prs', label: 'PRs' },
+  { key: 'issues', label: 'Issues' },
+  { key: 'commits', label: 'Commits' },
+  { key: 'aggregate', label: 'Aggregate' },
+] as const
+const REPO_DATA_COLUMNS = [
+  { key: 'defaultBranch', label: 'Default Branch' },
+  { key: 'prs', label: 'PRs' },
+  { key: 'issues', label: 'Issues' },
+  { key: 'commits', label: 'Commits' },
+] as const
+const MOCK_REPO_STEP_DELAY_MS = 220
 
 type TokenValidationState = 'idle' | 'validating' | 'valid' | 'invalid' | 'error'
 type RepositoryDiscoveryState = 'idle' | 'loading' | 'success' | 'error'
+type RunPhase = 'idle' | 'running' | 'done' | 'partial' | 'error' | 'cancelled'
+type ProgressStatus = 'queued' | 'fetching' | 'done' | 'error'
+type RunStepKey = (typeof RUN_STEPS)[number]['key']
+type RepoDataKey = (typeof REPO_DATA_COLUMNS)[number]['key']
 
 type GraphQLError = {
   message?: string
@@ -37,6 +56,23 @@ type RepositorySummary = {
   url: string
 }
 
+type StepStatusMap = Record<RunStepKey, ProgressStatus>
+type RepoDataStatusMap = Record<RepoDataKey, ProgressStatus>
+
+type RepoMatrixRow = {
+  repoId: string
+  repoName: string
+  statuses: RepoDataStatusMap
+}
+
+type RunErrorItem = {
+  step: RunStepKey
+  message: string
+  repoId?: string
+  repoName?: string
+  dataKey?: RepoDataKey
+}
+
 type ViewerValidationData = {
   viewer?: {
     login?: string
@@ -53,6 +89,32 @@ type RestRepositoryResponse = Array<{
   private?: boolean
   html_url?: string
 }>
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+function createStepStatusMap(initialStatus: ProgressStatus): StepStatusMap {
+  return RUN_STEPS.reduce(
+    (accumulator, step) => {
+      accumulator[step.key] = initialStatus
+      return accumulator
+    },
+    {} as StepStatusMap,
+  )
+}
+
+function createRepoDataStatusMap(initialStatus: ProgressStatus): RepoDataStatusMap {
+  return REPO_DATA_COLUMNS.reduce(
+    (accumulator, column) => {
+      accumulator[column.key] = initialStatus
+      return accumulator
+    },
+    {} as RepoDataStatusMap,
+  )
+}
 
 function getRepositoryOwner(nameWithOwner: string): string {
   const separatorIndex = nameWithOwner.indexOf('/')
@@ -121,6 +183,16 @@ function App() {
     state: 'idle',
     message: 'No repositories loaded yet.',
   })
+  const [runPhase, setRunPhase] = useState<RunPhase>('idle')
+  const [currentRunId, setCurrentRunId] = useState<number | null>(null)
+  const [activeStep, setActiveStep] = useState<RunStepKey | null>(null)
+  const [stepStatuses, setStepStatuses] = useState<StepStatusMap>(() => createStepStatusMap('queued'))
+  const [repoMatrixRows, setRepoMatrixRows] = useState<RepoMatrixRow[]>([])
+  const [runErrors, setRunErrors] = useState<RunErrorItem[]>([])
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
+  const [runFinishedAt, setRunFinishedAt] = useState<number | null>(null)
+  const runSequenceRef = useRef(0)
+  const activeRunRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -156,6 +228,60 @@ function App() {
     }
   }, [isTokenHelpOpen])
 
+  async function validateTokenWithGitHub(trimmedToken: string): Promise<TokenValidationStatus> {
+    try {
+      const { response, payload } = await executeGitHubGraphQL<ViewerValidationData>(trimmedToken, VIEWER_QUERY)
+      const errorMessage = extractGraphQLErrorMessage(payload)
+
+      if (!response.ok) {
+        if (response.status === 401 || errorMessage.toLowerCase().includes('bad credentials')) {
+          return {
+            state: 'invalid',
+            message: 'Token is invalid or missing required permissions.',
+          }
+        }
+
+        return {
+          state: 'error',
+          message: `Validation failed with HTTP ${response.status}.`,
+        }
+      }
+
+      if (errorMessage.length > 0) {
+        if (errorMessage.toLowerCase().includes('bad credentials')) {
+          return {
+            state: 'invalid',
+            message: 'Token is invalid or missing required permissions.',
+          }
+        }
+
+        return {
+          state: 'error',
+          message: errorMessage,
+        }
+      }
+
+      const viewerLogin = payload?.data?.viewer?.login
+      if (!viewerLogin) {
+        return {
+          state: 'error',
+          message: 'Validation response did not include viewer login.',
+        }
+      }
+
+      return {
+        state: 'valid',
+        message: `Token is valid for @${viewerLogin}.`,
+        viewerLogin,
+      }
+    } catch {
+      return {
+        state: 'error',
+        message: 'Network error while validating token.',
+      }
+    }
+  }
+
   async function handleValidateToken() {
     const trimmedToken = token.trim()
     if (trimmedToken.length === 0) {
@@ -171,62 +297,8 @@ function App() {
       message: 'Validating token against GitHub GraphQL...',
     })
 
-    try {
-      const { response, payload } = await executeGitHubGraphQL<ViewerValidationData>(trimmedToken, VIEWER_QUERY)
-      const errorMessage = extractGraphQLErrorMessage(payload)
-
-      if (!response.ok) {
-        if (response.status === 401 || errorMessage.toLowerCase().includes('bad credentials')) {
-          setTokenStatus({
-            state: 'invalid',
-            message: 'Token is invalid or missing required permissions.',
-          })
-          return
-        }
-
-        setTokenStatus({
-          state: 'error',
-          message: `Validation failed with HTTP ${response.status}.`,
-        })
-        return
-      }
-
-      if (errorMessage.length > 0) {
-        if (errorMessage.toLowerCase().includes('bad credentials')) {
-          setTokenStatus({
-            state: 'invalid',
-            message: 'Token is invalid or missing required permissions.',
-          })
-          return
-        }
-
-        setTokenStatus({
-          state: 'error',
-          message: errorMessage,
-        })
-        return
-      }
-
-      const viewerLogin = payload?.data?.viewer?.login
-      if (!viewerLogin) {
-        setTokenStatus({
-          state: 'error',
-          message: 'Validation response did not include viewer login.',
-        })
-        return
-      }
-
-      setTokenStatus({
-        state: 'valid',
-        message: `Token is valid for @${viewerLogin}.`,
-        viewerLogin,
-      })
-    } catch {
-      setTokenStatus({
-        state: 'error',
-        message: 'Network error while validating token.',
-      })
-    }
+    const validationStatus = await validateTokenWithGitHub(trimmedToken)
+    setTokenStatus(validationStatus)
   }
 
   async function handleDiscoverRepositories() {
@@ -345,12 +417,21 @@ function App() {
   }
 
   function handleClearToken() {
+    activeRunRef.current = null
     setToken('')
     setPersistToken(false)
     setRepoSearchTerm('')
     setOwnerFilter('all')
     setDiscoveredRepos([])
     setSelectedRepoIds([])
+    setRunPhase('idle')
+    setCurrentRunId(null)
+    setActiveStep(null)
+    setStepStatuses(createStepStatusMap('queued'))
+    setRepoMatrixRows([])
+    setRunErrors([])
+    setRunStartedAt(null)
+    setRunFinishedAt(null)
     setRepoDiscoveryStatus({
       state: 'idle',
       message: 'No repositories loaded yet.',
@@ -379,6 +460,10 @@ function App() {
   const tokenStatusClassName = `token-status token-status--${tokenStatus.state}`
   const repoStatusClassName = `repo-status repo-status--${repoDiscoveryStatus.state}`
   const selectedRepoIdSet = useMemo(() => new Set(selectedRepoIds), [selectedRepoIds])
+  const selectedRepos = useMemo(
+    () => discoveredRepos.filter((repo) => selectedRepoIdSet.has(repo.id)),
+    [discoveredRepos, selectedRepoIdSet],
+  )
   const availableOwners = useMemo(() => {
     const uniqueOwners = new Set<string>()
     for (const repo of discoveredRepos) {
@@ -402,6 +487,28 @@ function App() {
   }, [discoveredRepos, ownerFilter, repoSearchTerm])
   const areAllVisibleReposSelected =
     filteredRepos.length > 0 && filteredRepos.every((repo) => selectedRepoIdSet.has(repo.id))
+  const isRunInProgress = runPhase === 'running'
+
+  const completedStepCount = useMemo(
+    () => RUN_STEPS.filter((step) => stepStatuses[step.key] === 'done' || stepStatuses[step.key] === 'error').length,
+    [stepStatuses],
+  )
+  const progressPercent = Math.round((completedStepCount / RUN_STEPS.length) * 100)
+  const runDurationMs = runStartedAt && runFinishedAt ? runFinishedAt - runStartedAt : null
+  const runPhaseLabel =
+    runPhase === 'idle'
+      ? 'Idle'
+      : runPhase === 'running'
+        ? 'Running'
+        : runPhase === 'done'
+          ? 'Done'
+          : runPhase === 'partial'
+            ? 'Partial'
+            : runPhase === 'cancelled'
+              ? 'Cancelled'
+              : 'Error'
+  const runPhaseClassName = `run-phase-badge run-phase-badge--${runPhase}`
+  const rerunButtonLabel = runPhase === 'idle' ? 'Start Run' : 'Retry Run'
 
   function handleToggleRepositorySelection(repoId: string) {
     setSelectedRepoIds((previous) => {
@@ -432,6 +539,185 @@ function App() {
     setSelectedRepoIds([])
   }
 
+  function setStepStatus(stepKey: RunStepKey, status: ProgressStatus) {
+    setStepStatuses((previous) => ({
+      ...previous,
+      [stepKey]: status,
+    }))
+  }
+
+  function setRepoDataStatus(repoId: string, dataKey: RepoDataKey, status: ProgressStatus) {
+    setRepoMatrixRows((previous) =>
+      previous.map((row) =>
+        row.repoId === repoId
+          ? {
+              ...row,
+              statuses: {
+                ...row.statuses,
+                [dataKey]: status,
+              },
+            }
+          : row,
+      ),
+    )
+  }
+
+  function isRunActive(runId: number): boolean {
+    return activeRunRef.current === runId
+  }
+
+  async function runRepoStep(
+    runId: number,
+    stepKey: RunStepKey,
+    dataKey: RepoDataKey,
+    repositories: RepositorySummary[],
+  ): Promise<boolean> {
+    setActiveStep(stepKey)
+    setStepStatus(stepKey, 'fetching')
+
+    for (const repository of repositories) {
+      if (!isRunActive(runId)) {
+        return false
+      }
+
+      setRepoDataStatus(repository.id, dataKey, 'fetching')
+      await delay(MOCK_REPO_STEP_DELAY_MS)
+
+      if (!isRunActive(runId)) {
+        return false
+      }
+
+      setRepoDataStatus(repository.id, dataKey, 'done')
+    }
+
+    setStepStatus(stepKey, 'done')
+    return true
+  }
+
+  async function handleRunAnalysis() {
+    const trimmedToken = token.trim()
+    if (trimmedToken.length === 0) {
+      setTokenStatus({
+        state: 'invalid',
+        message: 'Enter a GitHub token before running analysis.',
+      })
+      return
+    }
+
+    if (selectedRepos.length === 0) {
+      setRepoDiscoveryStatus({
+        state: 'error',
+        message: 'Select at least one repository before running analysis.',
+      })
+      return
+    }
+
+    const runId = runSequenceRef.current + 1
+    runSequenceRef.current = runId
+    activeRunRef.current = runId
+    const runStarted = Date.now()
+
+    setCurrentRunId(runId)
+    setRunPhase('running')
+    setActiveStep(null)
+    setRunErrors([])
+    setRunStartedAt(runStarted)
+    setRunFinishedAt(null)
+    setStepStatuses(createStepStatusMap('queued'))
+    setRepoMatrixRows(
+      selectedRepos.map((repo) => ({
+        repoId: repo.id,
+        repoName: repo.nameWithOwner,
+        statuses: createRepoDataStatusMap('queued'),
+      })),
+    )
+
+    setStepStatus('tokenCheck', 'fetching')
+    setActiveStep('tokenCheck')
+    setTokenStatus({
+      state: 'validating',
+      message: 'Validating token against GitHub GraphQL...',
+    })
+    const validationStatus = await validateTokenWithGitHub(trimmedToken)
+
+    if (!isRunActive(runId)) {
+      return
+    }
+
+    setTokenStatus(validationStatus)
+    if (validationStatus.state !== 'valid') {
+      setStepStatus('tokenCheck', 'error')
+      setRunErrors([
+        {
+          step: 'tokenCheck',
+          message: validationStatus.message,
+        },
+      ])
+      setRunPhase('error')
+      setRunFinishedAt(Date.now())
+      setActiveStep(null)
+      activeRunRef.current = null
+      return
+    }
+    setStepStatus('tokenCheck', 'done')
+
+    setActiveStep('repoPrep')
+    setStepStatus('repoPrep', 'fetching')
+    for (const repository of selectedRepos) {
+      if (!isRunActive(runId)) {
+        return
+      }
+
+      setRepoDataStatus(repository.id, 'defaultBranch', 'fetching')
+      await delay(MOCK_REPO_STEP_DELAY_MS)
+      if (!isRunActive(runId)) {
+        return
+      }
+
+      setRepoDataStatus(repository.id, 'defaultBranch', 'done')
+    }
+    setStepStatus('repoPrep', 'done')
+
+    const prStepCompleted = await runRepoStep(runId, 'prs', 'prs', selectedRepos)
+    if (!prStepCompleted) {
+      return
+    }
+
+    const issuesStepCompleted = await runRepoStep(runId, 'issues', 'issues', selectedRepos)
+    if (!issuesStepCompleted) {
+      return
+    }
+
+    const commitsStepCompleted = await runRepoStep(runId, 'commits', 'commits', selectedRepos)
+    if (!commitsStepCompleted) {
+      return
+    }
+
+    setActiveStep('aggregate')
+    setStepStatus('aggregate', 'fetching')
+    await delay(MOCK_REPO_STEP_DELAY_MS)
+    if (!isRunActive(runId)) {
+      return
+    }
+    setStepStatus('aggregate', 'done')
+
+    setRunPhase('done')
+    setRunFinishedAt(Date.now())
+    setActiveStep(null)
+    activeRunRef.current = null
+  }
+
+  function handleCancelRun() {
+    if (!isRunInProgress) {
+      return
+    }
+
+    activeRunRef.current = null
+    setRunPhase('cancelled')
+    setActiveStep(null)
+    setRunFinishedAt(Date.now())
+  }
+
   return (
     <div className="app-shell">
       <header className="setup-layout">
@@ -460,11 +746,20 @@ function App() {
                 placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
                 value={token}
                 onChange={(event) => {
+                  activeRunRef.current = null
                   setToken(event.target.value)
                   setRepoSearchTerm('')
                   setOwnerFilter('all')
                   setDiscoveredRepos([])
                   setSelectedRepoIds([])
+                  setRunPhase('idle')
+                  setCurrentRunId(null)
+                  setActiveStep(null)
+                  setStepStatuses(createStepStatusMap('queued'))
+                  setRepoMatrixRows([])
+                  setRunErrors([])
+                  setRunStartedAt(null)
+                  setRunFinishedAt(null)
                   setRepoDiscoveryStatus({
                     state: 'idle',
                     message: 'No repositories loaded yet.',
@@ -534,21 +829,30 @@ function App() {
               />
             </label>
             <div className="action-row">
-              <button type="button" onClick={handleDiscoverRepositories} disabled={isDiscoveringRepos}>
+              <button type="button" onClick={handleDiscoverRepositories} disabled={isDiscoveringRepos || isRunInProgress}>
                 {isDiscoveringRepos ? 'Discovering...' : 'Discover Repos'}
               </button>
               <button
                 type="button"
                 onClick={handleSelectAllVisibleRepos}
-                disabled={filteredRepos.length === 0 || areAllVisibleReposSelected}
+                disabled={filteredRepos.length === 0 || areAllVisibleReposSelected || isRunInProgress}
               >
                 Select All Visible
               </button>
-              <button type="button" onClick={handleClearSelectedRepos} disabled={selectedRepoIds.length === 0}>
+              <button
+                type="button"
+                onClick={handleClearSelectedRepos}
+                disabled={selectedRepoIds.length === 0 || isRunInProgress}
+              >
                 Clear Selection
               </button>
-              <button type="button" className="button-primary">
-                Run Analysis
+              <button
+                type="button"
+                className="button-primary"
+                onClick={handleRunAnalysis}
+                disabled={isRunInProgress || isDiscoveringRepos || selectedRepos.length === 0}
+              >
+                {isRunInProgress ? 'Running...' : 'Run Analysis'}
               </button>
             </div>
             <p className={repoStatusClassName}>{repoDiscoveryStatus.message}</p>
@@ -588,10 +892,92 @@ function App() {
       </header>
 
       <section className="panel status-panel">
-        <div>
-          <h2>Fetch Status</h2>
-          <p>Waiting for analysis run.</p>
+        <div className="status-header">
+          <div>
+            <h2>Fetch Status</h2>
+            <p>Run #{currentRunId ?? '-'} · {runPhaseLabel}</p>
+          </div>
+          <div className="status-actions">
+            <span className={runPhaseClassName}>{runPhaseLabel}</span>
+            {isRunInProgress ? (
+              <button type="button" onClick={handleCancelRun}>
+                Cancel Run
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleRunAnalysis}
+                disabled={selectedRepos.length === 0 || isDiscoveringRepos}
+              >
+                {rerunButtonLabel}
+              </button>
+            )}
+          </div>
         </div>
+
+        <div className="run-meta">
+          <p>Progress: {progressPercent}% ({completedStepCount}/{RUN_STEPS.length} steps)</p>
+          <p>Active Step: {activeStep ? RUN_STEPS.find((step) => step.key === activeStep)?.label : 'None'}</p>
+          <p>Selected Repos: {selectedRepos.length}</p>
+          <p>Duration: {runDurationMs === null ? '-' : `${Math.max(1, Math.round(runDurationMs / 1000))}s`}</p>
+        </div>
+
+        <div className="step-progress-panel">
+          {RUN_STEPS.map((step) => (
+            <div className="step-progress-row" key={step.key}>
+              <span>{step.label}</span>
+              <span className={`status-chip status-chip--${stepStatuses[step.key]}`}>{stepStatuses[step.key]}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="matrix-panel">
+          <h3>Per-Repo Matrix</h3>
+          {repoMatrixRows.length === 0 ? (
+            <p className="matrix-empty">Run analysis to populate per-repository fetch statuses.</p>
+          ) : (
+            <div className="matrix-scroll">
+              <table className="matrix-table">
+                <thead>
+                  <tr>
+                    <th>Repository</th>
+                    {REPO_DATA_COLUMNS.map((column) => (
+                      <th key={column.key}>{column.label}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {repoMatrixRows.map((row) => (
+                    <tr key={row.repoId}>
+                      <td>{row.repoName}</td>
+                      {REPO_DATA_COLUMNS.map((column) => (
+                        <td key={`${row.repoId}-${column.key}`}>
+                          <span className={`status-chip status-chip--${row.statuses[column.key]}`}>
+                            {row.statuses[column.key]}
+                          </span>
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {runErrors.length > 0 && (
+          <div className="run-errors-panel">
+            <h3>Run Errors</h3>
+            <ul>
+              {runErrors.map((errorItem, index) => (
+                <li key={`${errorItem.step}-${errorItem.repoId ?? 'global'}-${index}`}>
+                  <strong>{RUN_STEPS.find((step) => step.key === errorItem.step)?.label}:</strong> {errorItem.message}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <p className="endpoint-note">GraphQL endpoint: {GITHUB_GRAPHQL_ENDPOINT}</p>
       </section>
 
