@@ -1441,6 +1441,17 @@ function App() {
   const [cycleChartSingleRepoId, setCycleChartSingleRepoId] = useState('')
   const [cycleChartMultiRepoIds, setCycleChartMultiRepoIds] = useState<string[]>([])
   const [cycleRollingWindow, setCycleRollingWindow] = useState<'2' | '4' | '8'>('4')
+  const [globalChartGranularity, setGlobalChartGranularity] = useState<AggregationGranularity>('weekly')
+  const [globalChartScopeMode, setGlobalChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [globalChartStartDay, setGlobalChartStartDay] = useState('')
+  const [globalChartEndDay, setGlobalChartEndDay] = useState('')
+  const [globalChartStyle, setGlobalChartStyle] = useState<ChartStyle>('line')
+  const [globalChartBreakdownMode, setGlobalChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
+  const [globalChartSingleRepoId, setGlobalChartSingleRepoId] = useState('')
+  const [globalChartMultiRepoIds, setGlobalChartMultiRepoIds] = useState<string[]>([])
+  const [globalCycleSmoothing, setGlobalCycleSmoothing] = useState<'2' | '4' | '8'>('4')
+  const [globalFiltersMessage, setGlobalFiltersMessage] = useState('')
+  const [globalFiltersMessageTone, setGlobalFiltersMessageTone] = useState<'idle' | 'success' | 'error'>('idle')
   const [rateLimitSnapshot, setRateLimitSnapshot] = useState<RateLimitSnapshot | null>(null)
   const [analysisDataByRepo, setAnalysisDataByRepo] = useState<Record<string, RepoAnalysisData>>({})
   const runSequenceRef = useRef(0)
@@ -1801,6 +1812,17 @@ function App() {
     setCycleChartSingleRepoId('')
     setCycleChartMultiRepoIds([])
     setCycleRollingWindow('4')
+    setGlobalChartGranularity('weekly')
+    setGlobalChartScopeMode('all')
+    setGlobalChartStartDay('')
+    setGlobalChartEndDay('')
+    setGlobalChartStyle('line')
+    setGlobalChartBreakdownMode('aggregate')
+    setGlobalChartSingleRepoId('')
+    setGlobalChartMultiRepoIds([])
+    setGlobalCycleSmoothing('4')
+    setGlobalFiltersMessage('')
+    setGlobalFiltersMessageTone('idle')
     setRateLimitSnapshot(null)
     setAnalysisDataByRepo({})
     setRepoDiscoveryStatus({
@@ -1879,6 +1901,12 @@ function App() {
               ? 'Cancelled'
               : 'Error'
   const runPhaseClassName = `run-phase-badge run-phase-badge--${runPhase}`
+  const globalFiltersMessageClassName =
+    globalFiltersMessageTone === 'error'
+      ? 'repo-status repo-status--error'
+      : globalFiltersMessageTone === 'success'
+        ? 'repo-status repo-status--success'
+        : 'repo-status repo-status--idle'
   const rerunButtonLabel = runPhase === 'idle' ? 'Start Run' : 'Retry Run'
   const loadedRepoCount = Object.keys(analysisDataByRepo).length
   const loadedRepoIds = useMemo(() => Object.keys(analysisDataByRepo), [analysisDataByRepo])
@@ -1898,6 +1926,11 @@ function App() {
         .sort((left, right) => left.repoName.localeCompare(right.repoName)),
     [analysisDataByRepo, loadedRepoIds],
   )
+  const globalChartSingleRepoValue =
+    globalChartSingleRepoId.length > 0 && analysisDataByRepo[globalChartSingleRepoId]
+      ? globalChartSingleRepoId
+      : loadedRepoIds[0] ?? ''
+  const globalChartMultiRepoValue = globalChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
   const commitsChartRepoIds = useMemo(() => {
     const validMultiRepoIds = commitsChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
     const effectiveSingleRepoId =
@@ -2252,6 +2285,64 @@ function App() {
     setSelectedRepoIds([])
   }
 
+  function handleApplyGlobalFilters() {
+    const rangeResolution = resolveChartDateRangeWithinCore(lastRunRange, globalChartStartDay, globalChartEndDay)
+    if (!rangeResolution.ok) {
+      setGlobalFiltersMessageTone('error')
+      setGlobalFiltersMessage(rangeResolution.message)
+      return
+    }
+
+    const validMultiRepoIds = globalChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+
+    setCommitsChartGranularity(globalChartGranularity)
+    setCommitsChartScopeMode(globalChartScopeMode)
+    setCommitsChartStartDay(globalChartStartDay)
+    setCommitsChartEndDay(globalChartEndDay)
+    setCommitsChartStyle(globalChartStyle)
+    setCommitsChartBreakdownMode(globalChartBreakdownMode)
+    setCommitsChartSingleRepoId(globalChartSingleRepoId)
+    setCommitsChartMultiRepoIds(validMultiRepoIds)
+
+    setPrChartGranularity(globalChartGranularity)
+    setPrChartScopeMode(globalChartScopeMode)
+    setPrChartStartDay(globalChartStartDay)
+    setPrChartEndDay(globalChartEndDay)
+    setPrChartStyle(globalChartStyle)
+    setPrChartBreakdownMode(globalChartBreakdownMode)
+    setPrChartSingleRepoId(globalChartSingleRepoId)
+    setPrChartMultiRepoIds(validMultiRepoIds)
+
+    setIssuesOpenedChartGranularity(globalChartGranularity)
+    setIssuesOpenedChartScopeMode(globalChartScopeMode)
+    setIssuesOpenedChartStartDay(globalChartStartDay)
+    setIssuesOpenedChartEndDay(globalChartEndDay)
+    setIssuesOpenedChartStyle(globalChartStyle)
+    setIssuesOpenedChartBreakdownMode(globalChartBreakdownMode)
+    setIssuesOpenedChartSingleRepoId(globalChartSingleRepoId)
+    setIssuesOpenedChartMultiRepoIds(validMultiRepoIds)
+
+    setIssuesClosedChartGranularity(globalChartGranularity)
+    setIssuesClosedChartScopeMode(globalChartScopeMode)
+    setIssuesClosedChartStartDay(globalChartStartDay)
+    setIssuesClosedChartEndDay(globalChartEndDay)
+    setIssuesClosedChartStyle(globalChartStyle)
+    setIssuesClosedChartBreakdownMode(globalChartBreakdownMode)
+    setIssuesClosedChartSingleRepoId(globalChartSingleRepoId)
+    setIssuesClosedChartMultiRepoIds(validMultiRepoIds)
+
+    setCycleChartGranularity(globalChartGranularity)
+    setCycleChartScopeMode(globalChartScopeMode)
+    setCycleChartStartDay(globalChartStartDay)
+    setCycleChartEndDay(globalChartEndDay)
+    setCycleChartSingleRepoId(globalChartSingleRepoId)
+    setCycleChartMultiRepoIds(validMultiRepoIds)
+    setCycleRollingWindow(globalCycleSmoothing)
+
+    setGlobalFiltersMessageTone('success')
+    setGlobalFiltersMessage('Applied filters to all chart sections.')
+  }
+
   function setStepStatus(stepKey: RunStepKey, status: ProgressStatus) {
     setStepStatuses((previous) => ({
       ...previous,
@@ -2551,6 +2642,10 @@ function App() {
     setIssuesClosedChartEndDay(runRange.endDay)
     setCycleChartStartDay(runRange.startDay)
     setCycleChartEndDay(runRange.endDay)
+    setGlobalChartStartDay(runRange.startDay)
+    setGlobalChartEndDay(runRange.endDay)
+    setGlobalFiltersMessage('')
+    setGlobalFiltersMessageTone('idle')
     setStepStatuses(createStepStatusMap('queued'))
     setAnalysisDataByRepo({})
     setRepoMatrixRows(
@@ -2871,6 +2966,17 @@ function App() {
                   setCycleChartSingleRepoId('')
                   setCycleChartMultiRepoIds([])
                   setCycleRollingWindow('4')
+                  setGlobalChartGranularity('weekly')
+                  setGlobalChartScopeMode('all')
+                  setGlobalChartStartDay('')
+                  setGlobalChartEndDay('')
+                  setGlobalChartStyle('line')
+                  setGlobalChartBreakdownMode('aggregate')
+                  setGlobalChartSingleRepoId('')
+                  setGlobalChartMultiRepoIds([])
+                  setGlobalCycleSmoothing('4')
+                  setGlobalFiltersMessage('')
+                  setGlobalFiltersMessageTone('idle')
                   setRateLimitSnapshot(null)
                   setAnalysisDataByRepo({})
                   setRepoDiscoveryStatus({
@@ -3126,6 +3232,140 @@ function App() {
 
         <p className="endpoint-note">
           GraphQL endpoint: {GITHUB_GRAPHQL_ENDPOINT} · REST endpoint: {GITHUB_REST_ENDPOINT}
+        </p>
+      </section>
+
+      <section className="panel global-filters-panel">
+        <div className="aggregation-preview-header">
+          <h3>Apply Filters To All Charts</h3>
+          <button type="button" onClick={handleApplyGlobalFilters} disabled={loadedRepoCount === 0 || !lastRunRange}>
+            Apply Filters
+          </button>
+        </div>
+        <div className="aggregation-controls">
+          <label>
+            Granularity
+            <select
+              value={globalChartGranularity}
+              onChange={(event) => setGlobalChartGranularity(event.target.value as AggregationGranularity)}
+              disabled={loadedRepoCount === 0}
+            >
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </label>
+          <label>
+            Scope
+            <select
+              value={globalChartScopeMode}
+              onChange={(event) => setGlobalChartScopeMode(event.target.value as CommitsChartScopeMode)}
+              disabled={loadedRepoCount === 0}
+            >
+              <option value="all">All loaded repos</option>
+              <option value="multi">Multi-select repos</option>
+              <option value="single">Single repo</option>
+            </select>
+          </label>
+          <label>
+            Start
+            <input
+              type="date"
+              value={globalChartStartDay}
+              min={lastRunRange?.startDay}
+              max={lastRunRange?.endDay}
+              onChange={(event) => setGlobalChartStartDay(event.target.value)}
+              disabled={loadedRepoCount === 0 || !lastRunRange}
+            />
+          </label>
+          <label>
+            End
+            <input
+              type="date"
+              value={globalChartEndDay}
+              min={lastRunRange?.startDay}
+              max={lastRunRange?.endDay}
+              onChange={(event) => setGlobalChartEndDay(event.target.value)}
+              disabled={loadedRepoCount === 0 || !lastRunRange}
+            />
+          </label>
+          <label>
+            Chart Style
+            <select
+              value={globalChartStyle}
+              onChange={(event) => setGlobalChartStyle(event.target.value as ChartStyle)}
+              disabled={loadedRepoCount === 0}
+            >
+              <option value="line">Line</option>
+              <option value="bar">Bar</option>
+              <option value="cumulative">Cumulative</option>
+            </select>
+          </label>
+          <label>
+            Breakdown
+            <select
+              value={globalChartBreakdownMode}
+              onChange={(event) => setGlobalChartBreakdownMode(event.target.value as ChartBreakdownMode)}
+              disabled={loadedRepoCount === 0}
+            >
+              <option value="aggregate">Total</option>
+              <option value="byRepo">Per repo</option>
+            </select>
+          </label>
+          <label>
+            Cycle Smoothing
+            <select
+              value={globalCycleSmoothing}
+              onChange={(event) => setGlobalCycleSmoothing(event.target.value as '2' | '4' | '8')}
+              disabled={loadedRepoCount === 0}
+            >
+              <option value="2">2 buckets</option>
+              <option value="4">4 buckets</option>
+              <option value="8">8 buckets</option>
+            </select>
+          </label>
+          {globalChartScopeMode === 'single' && (
+            <label>
+              Repo
+              <select
+                value={globalChartSingleRepoValue}
+                onChange={(event) => setGlobalChartSingleRepoId(event.target.value)}
+                disabled={loadedRepoOptions.length === 0}
+              >
+                {loadedRepoOptions.map((repoOption) => (
+                  <option key={repoOption.repoId} value={repoOption.repoId}>
+                    {repoOption.repoName}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {globalChartScopeMode === 'multi' && (
+            <label>
+              Repo Set
+              <select
+                multiple
+                size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
+                value={globalChartMultiRepoValue}
+                onChange={(event) => {
+                  const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
+                  setGlobalChartMultiRepoIds(selectedValues)
+                }}
+                disabled={loadedRepoOptions.length === 0}
+              >
+                {loadedRepoOptions.map((repoOption) => (
+                  <option key={repoOption.repoId} value={repoOption.repoId}>
+                    {repoOption.repoName}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        <p className={globalFiltersMessageClassName}>
+          {globalFiltersMessage.length > 0
+            ? globalFiltersMessage
+            : 'Configure shared filters, then apply to sync all chart sections.'}
         </p>
       </section>
 

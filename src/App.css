@@ -293,6 +293,12 @@
   gap: 0.9rem;
 }
 
+.global-filters-panel {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
 .status-panel h2,
 .dashboard-section h2 {
   margin: 0;
@@ -482,6 +488,15 @@
 }
 
 .aggregation-controls select {
+  min-height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--control-border);
+  background: #fff;
+  color: var(--text-primary);
+  padding: 0.2rem 0.5rem;
+}
+
+.aggregation-controls input {
   min-height: 32px;
   border-radius: 8px;
   border: 1px solid var(--control-border);
