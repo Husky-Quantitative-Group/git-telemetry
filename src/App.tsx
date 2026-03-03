@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { GITHUB_GRAPHQL_ENDPOINT, GITHUB_REST_ENDPOINT } from './config/env'
 import './App.css'
 
@@ -267,7 +267,8 @@ type RepoRawAnalysisData = {
 type AggregationGranularity = 'daily' | 'weekly' | 'monthly'
 type AggregationScope = 'selected' | 'loaded'
 type CommitsChartScopeMode = 'all' | 'multi' | 'single'
-type ChartSeriesMode = 'aggregate' | 'byRepo'
+type ChartBreakdownMode = 'aggregate' | 'byRepo'
+type ChartStyle = 'line' | 'bar'
 
 type AggregatedBucketPoint = {
   bucketStart: string
@@ -1074,13 +1075,15 @@ function buildActivityChartData(series: AggregatedBucketPoint[], repoIds: string
 
 function ActivityLineChart({
   data,
-  seriesMode,
+  breakdownMode,
+  chartStyle,
   lines,
   aggregateLabel,
   emptyMessage,
 }: {
   data: ActivityChartDatum[]
-  seriesMode: ChartSeriesMode
+  breakdownMode: ChartBreakdownMode
+  chartStyle: ChartStyle
   lines: ActivityChartLine[]
   aggregateLabel: string
   emptyMessage: string
@@ -1090,47 +1093,75 @@ function ActivityLineChart({
   }
 
   const hasPerRepoLines = lines.length > 0
-  if (seriesMode === 'byRepo' && !hasPerRepoLines) {
-    return <p className="commits-chart-empty">No repositories available for per-repo series.</p>
+  if (breakdownMode === 'byRepo' && !hasPerRepoLines) {
+    return <p className="commits-chart-empty">No repositories available for per-repo breakdown.</p>
   }
+
+  const showAggregate = breakdownMode === 'aggregate'
 
   return (
     <div className="commits-chart-canvas">
       <ResponsiveContainer width="100%" height={320}>
-        <LineChart data={data} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
-          <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
-          <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
-          <Tooltip
-            contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
-            labelStyle={{ color: '#16210e', fontWeight: 700 }}
-          />
-          <Legend />
-          {seriesMode === 'aggregate' ? (
-            <Line
-              type="monotone"
-              dataKey="total"
-              name={aggregateLabel}
-              stroke="#1f7a3a"
-              strokeWidth={2}
-              dot={false}
-              activeDot={{ r: 5 }}
+        {chartStyle === 'line' ? (
+          <LineChart data={data} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
+            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <Tooltip
+              contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
+              labelStyle={{ color: '#16210e', fontWeight: 700 }}
             />
-          ) : (
-            lines.map((lineConfig) => (
+            <Legend />
+            {showAggregate ? (
               <Line
-                key={lineConfig.dataKey}
                 type="monotone"
-                dataKey={lineConfig.dataKey}
-                name={lineConfig.label}
-                stroke={lineConfig.color}
+                dataKey="total"
+                name={aggregateLabel}
+                stroke="#1f7a3a"
                 strokeWidth={2}
                 dot={false}
-                activeDot={{ r: 4 }}
+                activeDot={{ r: 5 }}
               />
-            ))
-          )}
-        </LineChart>
+            ) : (
+              lines.map((lineConfig) => (
+                <Line
+                  key={lineConfig.dataKey}
+                  type="monotone"
+                  dataKey={lineConfig.dataKey}
+                  name={lineConfig.label}
+                  stroke={lineConfig.color}
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 4 }}
+                />
+              ))
+            )}
+          </LineChart>
+        ) : (
+          <BarChart data={data} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
+            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <Tooltip
+              contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
+              labelStyle={{ color: '#16210e', fontWeight: 700 }}
+            />
+            <Legend />
+            {showAggregate ? (
+              <Bar dataKey="total" name={aggregateLabel} fill="#1f7a3a" />
+            ) : (
+              lines.map((lineConfig) => (
+                <Bar
+                  key={lineConfig.dataKey}
+                  dataKey={lineConfig.dataKey}
+                  name={lineConfig.label}
+                  fill={lineConfig.color}
+                  stackId="stack"
+                />
+              ))
+            )}
+          </BarChart>
+        )}
       </ResponsiveContainer>
     </div>
   )
@@ -1211,22 +1242,26 @@ function App() {
   const [aggregationScope, setAggregationScope] = useState<AggregationScope>('selected')
   const [commitsChartGranularity, setCommitsChartGranularity] = useState<AggregationGranularity>('weekly')
   const [commitsChartScopeMode, setCommitsChartScopeMode] = useState<CommitsChartScopeMode>('all')
-  const [commitsChartSeriesMode, setCommitsChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
+  const [commitsChartStyle, setCommitsChartStyle] = useState<ChartStyle>('line')
+  const [commitsChartBreakdownMode, setCommitsChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
   const [commitsChartSingleRepoId, setCommitsChartSingleRepoId] = useState('')
   const [commitsChartMultiRepoIds, setCommitsChartMultiRepoIds] = useState<string[]>([])
   const [prChartGranularity, setPrChartGranularity] = useState<AggregationGranularity>('weekly')
   const [prChartScopeMode, setPrChartScopeMode] = useState<CommitsChartScopeMode>('all')
-  const [prChartSeriesMode, setPrChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
+  const [prChartStyle, setPrChartStyle] = useState<ChartStyle>('line')
+  const [prChartBreakdownMode, setPrChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
   const [prChartSingleRepoId, setPrChartSingleRepoId] = useState('')
   const [prChartMultiRepoIds, setPrChartMultiRepoIds] = useState<string[]>([])
   const [issuesOpenedChartGranularity, setIssuesOpenedChartGranularity] = useState<AggregationGranularity>('weekly')
   const [issuesOpenedChartScopeMode, setIssuesOpenedChartScopeMode] = useState<CommitsChartScopeMode>('all')
-  const [issuesOpenedChartSeriesMode, setIssuesOpenedChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
+  const [issuesOpenedChartStyle, setIssuesOpenedChartStyle] = useState<ChartStyle>('line')
+  const [issuesOpenedChartBreakdownMode, setIssuesOpenedChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
   const [issuesOpenedChartSingleRepoId, setIssuesOpenedChartSingleRepoId] = useState('')
   const [issuesOpenedChartMultiRepoIds, setIssuesOpenedChartMultiRepoIds] = useState<string[]>([])
   const [issuesClosedChartGranularity, setIssuesClosedChartGranularity] = useState<AggregationGranularity>('weekly')
   const [issuesClosedChartScopeMode, setIssuesClosedChartScopeMode] = useState<CommitsChartScopeMode>('all')
-  const [issuesClosedChartSeriesMode, setIssuesClosedChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
+  const [issuesClosedChartStyle, setIssuesClosedChartStyle] = useState<ChartStyle>('line')
+  const [issuesClosedChartBreakdownMode, setIssuesClosedChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
   const [issuesClosedChartSingleRepoId, setIssuesClosedChartSingleRepoId] = useState('')
   const [issuesClosedChartMultiRepoIds, setIssuesClosedChartMultiRepoIds] = useState<string[]>([])
   const [cycleChartGranularity, setCycleChartGranularity] = useState<AggregationGranularity>('weekly')
@@ -1565,14 +1600,33 @@ function App() {
     setLastRunRangeLabel('Last 365 days')
     setCommitsChartGranularity('weekly')
     setCommitsChartScopeMode('all')
-    setCommitsChartSeriesMode('aggregate')
+    setCommitsChartStyle('line')
+    setCommitsChartBreakdownMode('aggregate')
     setCommitsChartSingleRepoId('')
     setCommitsChartMultiRepoIds([])
     setPrChartGranularity('weekly')
     setPrChartScopeMode('all')
-    setPrChartSeriesMode('aggregate')
+    setPrChartStyle('line')
+    setPrChartBreakdownMode('aggregate')
     setPrChartSingleRepoId('')
     setPrChartMultiRepoIds([])
+    setIssuesOpenedChartGranularity('weekly')
+    setIssuesOpenedChartScopeMode('all')
+    setIssuesOpenedChartStyle('line')
+    setIssuesOpenedChartBreakdownMode('aggregate')
+    setIssuesOpenedChartSingleRepoId('')
+    setIssuesOpenedChartMultiRepoIds([])
+    setIssuesClosedChartGranularity('weekly')
+    setIssuesClosedChartScopeMode('all')
+    setIssuesClosedChartStyle('line')
+    setIssuesClosedChartBreakdownMode('aggregate')
+    setIssuesClosedChartSingleRepoId('')
+    setIssuesClosedChartMultiRepoIds([])
+    setCycleChartGranularity('weekly')
+    setCycleChartScopeMode('all')
+    setCycleChartSingleRepoId('')
+    setCycleChartMultiRepoIds([])
+    setCycleRollingWindow('4')
     setRateLimitSnapshot(null)
     setAnalysisDataByRepo({})
     setRepoDiscoveryStatus({
@@ -2551,14 +2605,33 @@ function App() {
                   setLastRunRangeLabel('Last 365 days')
                   setCommitsChartGranularity('weekly')
                   setCommitsChartScopeMode('all')
-                  setCommitsChartSeriesMode('aggregate')
+                  setCommitsChartStyle('line')
+                  setCommitsChartBreakdownMode('aggregate')
                   setCommitsChartSingleRepoId('')
                   setCommitsChartMultiRepoIds([])
                   setPrChartGranularity('weekly')
                   setPrChartScopeMode('all')
-                  setPrChartSeriesMode('aggregate')
+                  setPrChartStyle('line')
+                  setPrChartBreakdownMode('aggregate')
                   setPrChartSingleRepoId('')
                   setPrChartMultiRepoIds([])
+                  setIssuesOpenedChartGranularity('weekly')
+                  setIssuesOpenedChartScopeMode('all')
+                  setIssuesOpenedChartStyle('line')
+                  setIssuesOpenedChartBreakdownMode('aggregate')
+                  setIssuesOpenedChartSingleRepoId('')
+                  setIssuesOpenedChartMultiRepoIds([])
+                  setIssuesClosedChartGranularity('weekly')
+                  setIssuesClosedChartScopeMode('all')
+                  setIssuesClosedChartStyle('line')
+                  setIssuesClosedChartBreakdownMode('aggregate')
+                  setIssuesClosedChartSingleRepoId('')
+                  setIssuesClosedChartMultiRepoIds([])
+                  setCycleChartGranularity('weekly')
+                  setCycleChartScopeMode('all')
+                  setCycleChartSingleRepoId('')
+                  setCycleChartMultiRepoIds([])
+                  setCycleRollingWindow('4')
                   setRateLimitSnapshot(null)
                   setAnalysisDataByRepo({})
                   setRepoDiscoveryStatus({
@@ -2942,14 +3015,25 @@ function App() {
                 </select>
               </label>
               <label>
-                Series
+                Chart Style
                 <select
-                  value={commitsChartSeriesMode}
-                  onChange={(event) => setCommitsChartSeriesMode(event.target.value as ChartSeriesMode)}
+                  value={commitsChartStyle}
+                  onChange={(event) => setCommitsChartStyle(event.target.value as ChartStyle)}
                   disabled={loadedRepoCount === 0}
                 >
-                  <option value="aggregate">Aggregate line</option>
-                  <option value="byRepo">Per-repo lines</option>
+                  <option value="line">Line</option>
+                  <option value="bar">Bar</option>
+                </select>
+              </label>
+              <label>
+                Breakdown
+                <select
+                  value={commitsChartBreakdownMode}
+                  onChange={(event) => setCommitsChartBreakdownMode(event.target.value as ChartBreakdownMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Total</option>
+                  <option value="byRepo">Per repo</option>
                 </select>
               </label>
               {commitsChartScopeMode === 'single' && (
@@ -3009,7 +3093,8 @@ function App() {
               </div>
               <ActivityLineChart
                 data={commitsChartData}
-                seriesMode={commitsChartSeriesMode}
+                breakdownMode={commitsChartBreakdownMode}
+                chartStyle={commitsChartStyle}
                 lines={commitsChartLines}
                 aggregateLabel="Total commits"
                 emptyMessage="No commit buckets in this range."
@@ -3049,14 +3134,25 @@ function App() {
                 </select>
               </label>
               <label>
-                Series
+                Chart Style
                 <select
-                  value={prChartSeriesMode}
-                  onChange={(event) => setPrChartSeriesMode(event.target.value as ChartSeriesMode)}
+                  value={prChartStyle}
+                  onChange={(event) => setPrChartStyle(event.target.value as ChartStyle)}
                   disabled={loadedRepoCount === 0}
                 >
-                  <option value="aggregate">Aggregate line</option>
-                  <option value="byRepo">Per-repo lines</option>
+                  <option value="line">Line</option>
+                  <option value="bar">Bar</option>
+                </select>
+              </label>
+              <label>
+                Breakdown
+                <select
+                  value={prChartBreakdownMode}
+                  onChange={(event) => setPrChartBreakdownMode(event.target.value as ChartBreakdownMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Total</option>
+                  <option value="byRepo">Per repo</option>
                 </select>
               </label>
               {prChartScopeMode === 'single' && (
@@ -3116,7 +3212,8 @@ function App() {
               </div>
               <ActivityLineChart
                 data={prOpenedChartData}
-                seriesMode={prChartSeriesMode}
+                breakdownMode={prChartBreakdownMode}
+                chartStyle={prChartStyle}
                 lines={prChartLines}
                 aggregateLabel="Opened PRs"
                 emptyMessage="No opened PR buckets in this range."
@@ -3156,14 +3253,25 @@ function App() {
                 </select>
               </label>
               <label>
-                Series
+                Chart Style
                 <select
-                  value={prChartSeriesMode}
-                  onChange={(event) => setPrChartSeriesMode(event.target.value as ChartSeriesMode)}
+                  value={prChartStyle}
+                  onChange={(event) => setPrChartStyle(event.target.value as ChartStyle)}
                   disabled={loadedRepoCount === 0}
                 >
-                  <option value="aggregate">Aggregate line</option>
-                  <option value="byRepo">Per-repo lines</option>
+                  <option value="line">Line</option>
+                  <option value="bar">Bar</option>
+                </select>
+              </label>
+              <label>
+                Breakdown
+                <select
+                  value={prChartBreakdownMode}
+                  onChange={(event) => setPrChartBreakdownMode(event.target.value as ChartBreakdownMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Total</option>
+                  <option value="byRepo">Per repo</option>
                 </select>
               </label>
               {prChartScopeMode === 'single' && (
@@ -3231,7 +3339,8 @@ function App() {
               </div>
               <ActivityLineChart
                 data={prMergedChartData}
-                seriesMode={prChartSeriesMode}
+                breakdownMode={prChartBreakdownMode}
+                chartStyle={prChartStyle}
                 lines={prChartLines}
                 aggregateLabel="Merged PRs"
                 emptyMessage="No merged PR buckets in this range."
@@ -3271,14 +3380,25 @@ function App() {
                 </select>
               </label>
               <label>
-                Series
+                Chart Style
                 <select
-                  value={issuesOpenedChartSeriesMode}
-                  onChange={(event) => setIssuesOpenedChartSeriesMode(event.target.value as ChartSeriesMode)}
+                  value={issuesOpenedChartStyle}
+                  onChange={(event) => setIssuesOpenedChartStyle(event.target.value as ChartStyle)}
                   disabled={loadedRepoCount === 0}
                 >
-                  <option value="aggregate">Aggregate line</option>
-                  <option value="byRepo">Per-repo lines</option>
+                  <option value="line">Line</option>
+                  <option value="bar">Bar</option>
+                </select>
+              </label>
+              <label>
+                Breakdown
+                <select
+                  value={issuesOpenedChartBreakdownMode}
+                  onChange={(event) => setIssuesOpenedChartBreakdownMode(event.target.value as ChartBreakdownMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Total</option>
+                  <option value="byRepo">Per repo</option>
                 </select>
               </label>
               {issuesOpenedChartScopeMode === 'single' && (
@@ -3338,7 +3458,8 @@ function App() {
               </div>
               <ActivityLineChart
                 data={issuesOpenedChartData}
-                seriesMode={issuesOpenedChartSeriesMode}
+                breakdownMode={issuesOpenedChartBreakdownMode}
+                chartStyle={issuesOpenedChartStyle}
                 lines={issuesOpenedChartLines}
                 aggregateLabel="Issues opened"
                 emptyMessage="No opened issue buckets in this range."
@@ -3378,14 +3499,25 @@ function App() {
                 </select>
               </label>
               <label>
-                Series
+                Chart Style
                 <select
-                  value={issuesClosedChartSeriesMode}
-                  onChange={(event) => setIssuesClosedChartSeriesMode(event.target.value as ChartSeriesMode)}
+                  value={issuesClosedChartStyle}
+                  onChange={(event) => setIssuesClosedChartStyle(event.target.value as ChartStyle)}
                   disabled={loadedRepoCount === 0}
                 >
-                  <option value="aggregate">Aggregate line</option>
-                  <option value="byRepo">Per-repo lines</option>
+                  <option value="line">Line</option>
+                  <option value="bar">Bar</option>
+                </select>
+              </label>
+              <label>
+                Breakdown
+                <select
+                  value={issuesClosedChartBreakdownMode}
+                  onChange={(event) => setIssuesClosedChartBreakdownMode(event.target.value as ChartBreakdownMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Total</option>
+                  <option value="byRepo">Per repo</option>
                 </select>
               </label>
               {issuesClosedChartScopeMode === 'single' && (
@@ -3445,7 +3577,8 @@ function App() {
               </div>
               <ActivityLineChart
                 data={issuesClosedChartData}
-                seriesMode={issuesClosedChartSeriesMode}
+                breakdownMode={issuesClosedChartBreakdownMode}
+                chartStyle={issuesClosedChartStyle}
                 lines={issuesClosedChartLines}
                 aggregateLabel="Issues closed"
                 emptyMessage="No closed issue buckets in this range."
