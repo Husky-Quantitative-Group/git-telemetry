@@ -38,7 +38,18 @@ const REPO_DATA_COLUMNS = [
   { key: 'issues', label: 'Issues' },
   { key: 'commits', label: 'Commits' },
 ] as const
-const CHART_COLORS = ['#1f7a3a', '#2f8f57', '#1f5d8b', '#8b651b', '#9a3f2f', '#5f4ca1', '#0e7490', '#6b8e23']
+const CHART_COLORS = [
+  '#4e79a7',
+  '#f28e2b',
+  '#e15759',
+  '#76b7b2',
+  '#59a14f',
+  '#edc948',
+  '#b07aa1',
+  '#ff9da7',
+  '#9c755f',
+  '#bab0ab',
+]
 const REPOSITORY_DEFAULT_BRANCH_QUERY = `
   query RepositoryDefaultBranch($owner: String!, $name: String!) {
     repository(owner: $owner, name: $name) {
@@ -298,8 +309,8 @@ type AggregatedRepoTotals = {
   issuesOpened: number
   issuesClosed: number
   mergeTimeCount: number
-  mergeTimeAverageHours: number | null
-  mergeTimeMedianHours: number | null
+  mergeTimeAverageDays: number | null
+  mergeTimeMedianDays: number | null
 }
 
 type AggregatedActivity = {
@@ -315,8 +326,8 @@ type AggregatedActivity = {
   }
   mergeTime: {
     count: number
-    averageHours: number | null
-    medianHours: number | null
+    averageDays: number | null
+    medianDays: number | null
   }
   series: {
     commits: AggregatedBucketPoint[]
@@ -332,12 +343,12 @@ type MergeTimeTrendPoint = {
   bucketStart: string
   bucketLabel: string
   count: number
-  averageHours: number | null
-  medianHours: number | null
+  averageDays: number | null
+  medianDays: number | null
 }
 
 type MergeTimeTrendChartPoint = MergeTimeTrendPoint & {
-  rollingAverageHours: number | null
+  rollingAverageDays: number | null
 }
 
 type ViewerValidationData = {
@@ -548,6 +559,15 @@ function getRepositoryOwner(nameWithOwner: string): string {
   }
 
   return nameWithOwner.slice(0, separatorIndex)
+}
+
+function getRepositoryShortName(nameWithOwner: string): string {
+  const separatorIndex = nameWithOwner.indexOf('/')
+  if (separatorIndex < 0 || separatorIndex >= nameWithOwner.length - 1) {
+    return nameWithOwner
+  }
+
+  return nameWithOwner.slice(separatorIndex + 1)
 }
 
 function parseRateLimitSnapshot(response: Response): RateLimitSnapshot | null {
@@ -943,9 +963,9 @@ function aggregateRepositoryActivity(
 
       const createdTime = new Date(pullRequest.createdAt).valueOf()
       if (!Number.isNaN(createdTime) && mergedTime > createdTime) {
-        const durationHours = (mergedTime - createdTime) / (1000 * 60 * 60)
-        repoMergeDurations.push(durationHours)
-        globalMergeDurations.push(durationHours)
+        const durationDays = (mergedTime - createdTime) / (1000 * 60 * 60 * 24)
+        repoMergeDurations.push(durationDays)
+        globalMergeDurations.push(durationDays)
       }
     }
 
@@ -992,8 +1012,8 @@ function aggregateRepositoryActivity(
       issuesOpened: repoIssuesOpened,
       issuesClosed: repoIssuesClosed,
       mergeTimeCount: repoMergeDurations.length,
-      mergeTimeAverageHours: calculateAverage(repoMergeDurations),
-      mergeTimeMedianHours: calculateMedian(repoMergeDurations),
+      mergeTimeAverageDays: calculateAverage(repoMergeDurations),
+      mergeTimeMedianDays: calculateMedian(repoMergeDurations),
     })
   }
 
@@ -1028,8 +1048,8 @@ function aggregateRepositoryActivity(
     },
     mergeTime: {
       count: globalMergeDurations.length,
-      averageHours: calculateAverage(globalMergeDurations),
-      medianHours: calculateMedian(globalMergeDurations),
+      averageDays: calculateAverage(globalMergeDurations),
+      medianDays: calculateMedian(globalMergeDurations),
     },
     series: {
       commits: commitsSeries,
@@ -1092,7 +1112,7 @@ function aggregateMergeTimeTrend(
         continue
       }
 
-      bucketDurations.push((mergedTime - createdTime) / (1000 * 60 * 60))
+      bucketDurations.push((mergedTime - createdTime) / (1000 * 60 * 60 * 24))
     }
   }
 
@@ -1102,8 +1122,8 @@ function aggregateMergeTimeTrend(
       bucketStart,
       bucketLabel: formatBucketLabel(bucketStart, granularity),
       count: durations.length,
-      averageHours: calculateAverage(durations),
-      medianHours: calculateMedian(durations),
+      averageDays: calculateAverage(durations),
+      medianDays: calculateMedian(durations),
     }
   })
 }
@@ -1119,17 +1139,17 @@ function buildMergeTimeTrendChartData(
 
     for (let cursor = startIndex; cursor <= index; cursor += 1) {
       const windowPoint = trend[cursor]
-      if (windowPoint.averageHours === null || windowPoint.count === 0) {
+      if (windowPoint.averageDays === null || windowPoint.count === 0) {
         continue
       }
 
-      weightedSum += windowPoint.averageHours * windowPoint.count
+      weightedSum += windowPoint.averageDays * windowPoint.count
       totalCount += windowPoint.count
     }
 
     return {
       ...point,
-      rollingAverageHours: totalCount > 0 ? weightedSum / totalCount : null,
+      rollingAverageDays: totalCount > 0 ? weightedSum / totalCount : null,
     }
   })
 }
@@ -1983,7 +2003,7 @@ function App() {
 
     return commitsChartAggregation.repoIds.map((repoId, index) => ({
       dataKey: `repo:${repoId}`,
-      label: analysisDataByRepo[repoId]?.repoName ?? repoId,
+      label: getRepositoryShortName(analysisDataByRepo[repoId]?.repoName ?? repoId),
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, commitsChartAggregation])
@@ -2050,7 +2070,7 @@ function App() {
 
     return prChartAggregation.repoIds.map((repoId, index) => ({
       dataKey: `repo:${repoId}`,
-      label: analysisDataByRepo[repoId]?.repoName ?? repoId,
+      label: getRepositoryShortName(analysisDataByRepo[repoId]?.repoName ?? repoId),
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, prChartAggregation])
@@ -2115,7 +2135,7 @@ function App() {
 
     return issuesOpenedChartAggregation.repoIds.map((repoId, index) => ({
       dataKey: `repo:${repoId}`,
-      label: analysisDataByRepo[repoId]?.repoName ?? repoId,
+      label: getRepositoryShortName(analysisDataByRepo[repoId]?.repoName ?? repoId),
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, issuesOpenedChartAggregation])
@@ -2184,7 +2204,7 @@ function App() {
 
     return issuesClosedChartAggregation.repoIds.map((repoId, index) => ({
       dataKey: `repo:${repoId}`,
-      label: analysisDataByRepo[repoId]?.repoName ?? repoId,
+      label: getRepositoryShortName(analysisDataByRepo[repoId]?.repoName ?? repoId),
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, issuesClosedChartAggregation])
@@ -4201,19 +4221,19 @@ function App() {
             <>
               <div className="stats-grid">
                 <div className="stat-card">
-                  <p>Merge Avg (hrs)</p>
+                  <p>Merge Avg (days)</p>
                   <strong>
-                    {cycleChartAggregation.mergeTime.averageHours === null
+                    {cycleChartAggregation.mergeTime.averageDays === null
                       ? '-'
-                      : cycleChartAggregation.mergeTime.averageHours.toFixed(1)}
+                      : cycleChartAggregation.mergeTime.averageDays.toFixed(1)}
                   </strong>
                 </div>
                 <div className="stat-card">
-                  <p>Merge Median (hrs)</p>
+                  <p>Merge Median (days)</p>
                   <strong>
-                    {cycleChartAggregation.mergeTime.medianHours === null
+                    {cycleChartAggregation.mergeTime.medianDays === null
                       ? '-'
-                      : cycleChartAggregation.mergeTime.medianHours.toFixed(1)}
+                      : cycleChartAggregation.mergeTime.medianDays.toFixed(1)}
                   </strong>
                 </div>
                 <div className="stat-card">
@@ -4230,7 +4250,7 @@ function App() {
                 </div>
               </div>
               <div className="pr-trend-card">
-                <h3>Merge Turnaround Trend (hours)</h3>
+                <h3>Merge Turnaround Trend (days)</h3>
                 {cycleMergeTimeTrendData.length === 0 ? (
                   <p className="commits-chart-empty">No merge-time trend points in this range.</p>
                 ) : (
@@ -4247,8 +4267,8 @@ function App() {
                         <Legend />
                         <Line
                           type="monotone"
-                          dataKey="averageHours"
-                          name="Bucket average"
+                          dataKey="averageDays"
+                          name="Bucket average (days)"
                           stroke="#1f5d8b"
                           strokeWidth={1.5}
                           dot={false}
@@ -4257,8 +4277,8 @@ function App() {
                         />
                         <Line
                           type="monotone"
-                          dataKey="rollingAverageHours"
-                          name={`Rolling avg (${cycleRollingWindowSize} buckets)`}
+                          dataKey="rollingAverageDays"
+                          name={`Rolling avg (${cycleRollingWindowSize} buckets, days)`}
                           stroke="#8b651b"
                           strokeWidth={2.5}
                           dot={false}
