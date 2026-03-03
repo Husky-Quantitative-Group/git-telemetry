@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import Select, { components, type MultiValue, type OptionProps } from 'react-select'
 import {
   Area,
   AreaChart,
@@ -50,6 +51,8 @@ const CHART_COLORS = [
   '#9c755f',
   '#bab0ab',
 ]
+const NO_REPO_SELECTION = '__none__'
+const ALL_REPOS_OPTION = '__all__'
 const REPOSITORY_DEFAULT_BRANCH_QUERY = `
   query RepositoryDefaultBranch($owner: String!, $name: String!) {
     repository(owner: $owner, name: $name) {
@@ -171,6 +174,17 @@ type RepositorySummary = {
   nameWithOwner: string
   isPrivate: boolean
   url: string
+}
+
+type LoadedRepoOption = {
+  repoId: string
+  repoName: string
+}
+
+type RepoSelectOption = {
+  value: string
+  label: string
+  isAll?: boolean
 }
 
 type StepStatusMap = Record<RunStepKey, ProgressStatus>
@@ -758,8 +772,8 @@ function getBucketStartDate(timestampIso: string, granularity: AggregationGranul
 
   const bucketDate = new Date(Date.UTC(parsedDate.getUTCFullYear(), parsedDate.getUTCMonth(), parsedDate.getUTCDate()))
   if (granularity === 'weekly') {
-    const dayOffsetFromMonday = (bucketDate.getUTCDay() + 6) % 7
-    bucketDate.setUTCDate(bucketDate.getUTCDate() - dayOffsetFromMonday)
+    const dayOffsetFromSunday = bucketDate.getUTCDay()
+    bucketDate.setUTCDate(bucketDate.getUTCDate() - dayOffsetFromSunday)
   } else if (granularity === 'monthly') {
     bucketDate.setUTCDate(1)
   }
@@ -1351,6 +1365,146 @@ function ActivityLineChart({
   )
 }
 
+function resolveMultiRepoSelection(selectedRepoIds: string[], availableRepoIds: string[]): string[] {
+  if (selectedRepoIds.includes(NO_REPO_SELECTION)) {
+    return []
+  }
+
+  const availableIdSet = new Set(availableRepoIds)
+  const validSelectedRepoIds = selectedRepoIds.filter((repoId) => availableIdSet.has(repoId))
+  return validSelectedRepoIds.length > 0 ? validSelectedRepoIds : availableRepoIds
+}
+
+function sanitizeMultiRepoSelection(selectedRepoIds: string[], availableRepoIds: string[]): string[] {
+  if (selectedRepoIds.includes(NO_REPO_SELECTION)) {
+    return [NO_REPO_SELECTION]
+  }
+
+  const availableIdSet = new Set(availableRepoIds)
+  return selectedRepoIds.filter((repoId) => availableIdSet.has(repoId))
+}
+
+function RepoMultiSelectDropdown({
+  options,
+  selectedRepoIds,
+  onChange,
+  disabled,
+}: {
+  options: LoadedRepoOption[]
+  selectedRepoIds: string[]
+  onChange: (nextRepoIds: string[]) => void
+  disabled: boolean
+}) {
+  const repoOptions: RepoSelectOption[] = useMemo(
+    () =>
+      options.map((repoOption) => ({
+        value: repoOption.repoId,
+        label: repoOption.repoName,
+      })),
+    [options],
+  )
+  const dropdownOptions: RepoSelectOption[] = useMemo(
+    () => [{ value: ALL_REPOS_OPTION, label: 'All', isAll: true }, ...repoOptions],
+    [repoOptions],
+  )
+  const selectedRepoIdSet = useMemo(() => new Set(selectedRepoIds), [selectedRepoIds])
+  const selectedValues = useMemo(
+    () => repoOptions.filter((repoOption) => selectedRepoIdSet.has(repoOption.value)),
+    [repoOptions, selectedRepoIdSet],
+  )
+  const allSelected = repoOptions.length > 0 && selectedValues.length === repoOptions.length
+  const selectedSummary =
+    repoOptions.length === 0 ? 'No repositories' : `${selectedValues.length}/${repoOptions.length} selected`
+  const dropdownWidthCh = useMemo(() => {
+    const longestRepoLabelLength = repoOptions.reduce((maxLength, repoOption) => Math.max(maxLength, repoOption.label.length), 0)
+    return Math.max(18, longestRepoLabelLength + 6)
+  }, [repoOptions])
+  const scrollbarWidthPx = 16
+
+  function handleSelectChange(nextValue: MultiValue<RepoSelectOption>) {
+    const hasAllOption = nextValue.some((option) => option.isAll)
+    if (hasAllOption) {
+      if (allSelected) {
+        onChange([NO_REPO_SELECTION])
+      } else {
+        onChange(repoOptions.map((repoOption) => repoOption.value))
+      }
+      return
+    }
+
+    const nextRepoIds = nextValue.filter((option) => !option.isAll).map((option) => option.value)
+    if (nextRepoIds.length === 0) {
+      onChange([NO_REPO_SELECTION])
+      return
+    }
+
+    onChange(nextRepoIds.length > 0 ? nextRepoIds : [NO_REPO_SELECTION])
+  }
+
+  function OptionRow(optionProps: OptionProps<RepoSelectOption, true>) {
+    const optionData = optionProps.data
+    const chosenValues = optionProps.getValue().filter((entry) => !entry.isAll)
+    const totalRepoOptions = (optionProps.options as RepoSelectOption[]).filter((entry) => !entry.isAll).length
+    const isAllChecked = totalRepoOptions > 0 && chosenValues.length === totalRepoOptions
+    const isChecked = optionData.isAll ? isAllChecked : chosenValues.some((entry) => entry.value === optionData.value)
+    const isIndeterminate = Boolean(optionData.isAll && chosenValues.length > 0 && !isAllChecked)
+
+    return (
+      <components.Option {...optionProps}>
+        <span className="repo-select-option">
+          <input
+            type="checkbox"
+            checked={isChecked}
+            ref={(node) => {
+              if (!node) {
+                return
+              }
+
+              node.indeterminate = isIndeterminate
+            }}
+            readOnly
+          />
+          <span>{optionData.label}</span>
+        </span>
+      </components.Option>
+    )
+  }
+
+  return (
+    <Select<RepoSelectOption, true>
+      classNamePrefix="repo-select"
+      isMulti
+      closeMenuOnSelect={false}
+      hideSelectedOptions={false}
+      backspaceRemovesValue={false}
+      isClearable={false}
+      controlShouldRenderValue={false}
+      tabSelectsValue={false}
+      options={dropdownOptions}
+      value={selectedValues}
+      onChange={handleSelectChange}
+      placeholder={selectedSummary}
+      isDisabled={disabled || repoOptions.length === 0}
+      styles={{
+        container: (base) => ({
+          ...base,
+          width: `calc(${dropdownWidthCh}ch + ${scrollbarWidthPx}px)`,
+          minWidth: `calc(${dropdownWidthCh}ch + ${scrollbarWidthPx}px)`,
+        }),
+        menu: (base) => ({
+          ...base,
+          width: `calc(${dropdownWidthCh}ch + ${scrollbarWidthPx}px)`,
+          minWidth: `calc(${dropdownWidthCh}ch + ${scrollbarWidthPx}px)`,
+        }),
+      }}
+      components={{
+        Option: OptionRow,
+        IndicatorSeparator: null,
+      }}
+    />
+  )
+}
+
 function readTokenFromStorage(): string {
   if (typeof window === 'undefined') {
     return ''
@@ -1423,7 +1577,7 @@ function App() {
   const [lastRunRange, setLastRunRange] = useState<RunDateRange | null>(null)
   const [lastRunRangeLabel, setLastRunRangeLabel] = useState<string>('Last 365 days')
   const [commitsChartGranularity, setCommitsChartGranularity] = useState<AggregationGranularity>('weekly')
-  const [commitsChartScopeMode, setCommitsChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [commitsChartScopeMode, setCommitsChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [commitsChartStyle, setCommitsChartStyle] = useState<ChartStyle>('line')
   const [commitsChartBreakdownMode, setCommitsChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
   const [commitsChartStartDay, setCommitsChartStartDay] = useState('')
@@ -1431,7 +1585,7 @@ function App() {
   const [commitsChartSingleRepoId, setCommitsChartSingleRepoId] = useState('')
   const [commitsChartMultiRepoIds, setCommitsChartMultiRepoIds] = useState<string[]>([])
   const [prChartGranularity, setPrChartGranularity] = useState<AggregationGranularity>('weekly')
-  const [prChartScopeMode, setPrChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [prChartScopeMode, setPrChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [prChartStyle, setPrChartStyle] = useState<ChartStyle>('line')
   const [prChartBreakdownMode, setPrChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
   const [prChartStartDay, setPrChartStartDay] = useState('')
@@ -1439,7 +1593,7 @@ function App() {
   const [prChartSingleRepoId, setPrChartSingleRepoId] = useState('')
   const [prChartMultiRepoIds, setPrChartMultiRepoIds] = useState<string[]>([])
   const [issuesOpenedChartGranularity, setIssuesOpenedChartGranularity] = useState<AggregationGranularity>('weekly')
-  const [issuesOpenedChartScopeMode, setIssuesOpenedChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [issuesOpenedChartScopeMode, setIssuesOpenedChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [issuesOpenedChartStyle, setIssuesOpenedChartStyle] = useState<ChartStyle>('line')
   const [issuesOpenedChartBreakdownMode, setIssuesOpenedChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
   const [issuesOpenedChartStartDay, setIssuesOpenedChartStartDay] = useState('')
@@ -1447,7 +1601,7 @@ function App() {
   const [issuesOpenedChartSingleRepoId, setIssuesOpenedChartSingleRepoId] = useState('')
   const [issuesOpenedChartMultiRepoIds, setIssuesOpenedChartMultiRepoIds] = useState<string[]>([])
   const [issuesClosedChartGranularity, setIssuesClosedChartGranularity] = useState<AggregationGranularity>('weekly')
-  const [issuesClosedChartScopeMode, setIssuesClosedChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [issuesClosedChartScopeMode, setIssuesClosedChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [issuesClosedChartStyle, setIssuesClosedChartStyle] = useState<ChartStyle>('line')
   const [issuesClosedChartBreakdownMode, setIssuesClosedChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
   const [issuesClosedChartStartDay, setIssuesClosedChartStartDay] = useState('')
@@ -1455,14 +1609,14 @@ function App() {
   const [issuesClosedChartSingleRepoId, setIssuesClosedChartSingleRepoId] = useState('')
   const [issuesClosedChartMultiRepoIds, setIssuesClosedChartMultiRepoIds] = useState<string[]>([])
   const [cycleChartGranularity, setCycleChartGranularity] = useState<AggregationGranularity>('weekly')
-  const [cycleChartScopeMode, setCycleChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [cycleChartScopeMode, setCycleChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [cycleChartStartDay, setCycleChartStartDay] = useState('')
   const [cycleChartEndDay, setCycleChartEndDay] = useState('')
   const [cycleChartSingleRepoId, setCycleChartSingleRepoId] = useState('')
   const [cycleChartMultiRepoIds, setCycleChartMultiRepoIds] = useState<string[]>([])
   const [cycleRollingWindow, setCycleRollingWindow] = useState<'2' | '4' | '8'>('4')
   const [globalChartGranularity, setGlobalChartGranularity] = useState<AggregationGranularity>('weekly')
-  const [globalChartScopeMode, setGlobalChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [globalChartScopeMode, setGlobalChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [globalChartStartDay, setGlobalChartStartDay] = useState('')
   const [globalChartEndDay, setGlobalChartEndDay] = useState('')
   const [globalChartStyle, setGlobalChartStyle] = useState<ChartStyle>('line')
@@ -1794,7 +1948,7 @@ function App() {
     setLastRunRange(null)
     setLastRunRangeLabel('Last 365 days')
     setCommitsChartGranularity('weekly')
-    setCommitsChartScopeMode('all')
+    setCommitsChartScopeMode('multi')
     setCommitsChartStyle('line')
     setCommitsChartBreakdownMode('aggregate')
     setCommitsChartStartDay('')
@@ -1802,7 +1956,7 @@ function App() {
     setCommitsChartSingleRepoId('')
     setCommitsChartMultiRepoIds([])
     setPrChartGranularity('weekly')
-    setPrChartScopeMode('all')
+    setPrChartScopeMode('multi')
     setPrChartStyle('line')
     setPrChartBreakdownMode('aggregate')
     setPrChartStartDay('')
@@ -1810,7 +1964,7 @@ function App() {
     setPrChartSingleRepoId('')
     setPrChartMultiRepoIds([])
     setIssuesOpenedChartGranularity('weekly')
-    setIssuesOpenedChartScopeMode('all')
+    setIssuesOpenedChartScopeMode('multi')
     setIssuesOpenedChartStyle('line')
     setIssuesOpenedChartBreakdownMode('aggregate')
     setIssuesOpenedChartStartDay('')
@@ -1818,7 +1972,7 @@ function App() {
     setIssuesOpenedChartSingleRepoId('')
     setIssuesOpenedChartMultiRepoIds([])
     setIssuesClosedChartGranularity('weekly')
-    setIssuesClosedChartScopeMode('all')
+    setIssuesClosedChartScopeMode('multi')
     setIssuesClosedChartStyle('line')
     setIssuesClosedChartBreakdownMode('aggregate')
     setIssuesClosedChartStartDay('')
@@ -1826,14 +1980,14 @@ function App() {
     setIssuesClosedChartSingleRepoId('')
     setIssuesClosedChartMultiRepoIds([])
     setCycleChartGranularity('weekly')
-    setCycleChartScopeMode('all')
+    setCycleChartScopeMode('multi')
     setCycleChartStartDay('')
     setCycleChartEndDay('')
     setCycleChartSingleRepoId('')
     setCycleChartMultiRepoIds([])
     setCycleRollingWindow('4')
     setGlobalChartGranularity('weekly')
-    setGlobalChartScopeMode('all')
+    setGlobalChartScopeMode('multi')
     setGlobalChartStartDay('')
     setGlobalChartEndDay('')
     setGlobalChartStyle('line')
@@ -1938,21 +2092,23 @@ function App() {
           return repoData
             ? {
                 repoId,
-                repoName: repoData.repoName,
+                repoName: getRepositoryShortName(repoData.repoName),
               }
             : null
         })
-        .filter((repoOption): repoOption is { repoId: string; repoName: string } => repoOption !== null)
+        .filter((repoOption): repoOption is LoadedRepoOption => repoOption !== null)
         .sort((left, right) => left.repoName.localeCompare(right.repoName)),
     [analysisDataByRepo, loadedRepoIds],
   )
-  const globalChartSingleRepoValue =
-    globalChartSingleRepoId.length > 0 && analysisDataByRepo[globalChartSingleRepoId]
-      ? globalChartSingleRepoId
-      : loadedRepoIds[0] ?? ''
-  const globalChartMultiRepoValue = globalChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+  const globalChartMultiRepoValue = useMemo(
+    () => resolveMultiRepoSelection(globalChartMultiRepoIds, loadedRepoIds),
+    [globalChartMultiRepoIds, loadedRepoIds],
+  )
+  const commitsChartMultiRepoValue = useMemo(
+    () => resolveMultiRepoSelection(commitsChartMultiRepoIds, loadedRepoIds),
+    [commitsChartMultiRepoIds, loadedRepoIds],
+  )
   const commitsChartRepoIds = useMemo(() => {
-    const validMultiRepoIds = commitsChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
     const effectiveSingleRepoId =
       commitsChartSingleRepoId.length > 0 && analysisDataByRepo[commitsChartSingleRepoId]
         ? commitsChartSingleRepoId
@@ -1963,11 +2119,11 @@ function App() {
     }
 
     if (commitsChartScopeMode === 'multi') {
-      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
+      return commitsChartMultiRepoValue
     }
 
     return loadedRepoIds
-  }, [analysisDataByRepo, commitsChartMultiRepoIds, commitsChartScopeMode, commitsChartSingleRepoId, loadedRepoIds])
+  }, [analysisDataByRepo, commitsChartMultiRepoValue, commitsChartScopeMode, commitsChartSingleRepoId, loadedRepoIds])
   const commitsChartRangeResolution = useMemo(
     () => resolveChartDateRangeWithinCore(lastRunRange, commitsChartStartDay, commitsChartEndDay),
     [commitsChartEndDay, commitsChartStartDay, lastRunRange],
@@ -2007,15 +2163,11 @@ function App() {
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, commitsChartAggregation])
-  const commitsChartSingleRepoValue =
-    commitsChartSingleRepoId.length > 0 && analysisDataByRepo[commitsChartSingleRepoId]
-      ? commitsChartSingleRepoId
-      : loadedRepoIds[0] ?? ''
-  const commitsChartMultiRepoValue = commitsChartMultiRepoIds.filter(
-    (repoId) => analysisDataByRepo[repoId] !== undefined,
+  const prChartMultiRepoValue = useMemo(
+    () => resolveMultiRepoSelection(prChartMultiRepoIds, loadedRepoIds),
+    [loadedRepoIds, prChartMultiRepoIds],
   )
   const prChartRepoIds = useMemo(() => {
-    const validMultiRepoIds = prChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
     const effectiveSingleRepoId =
       prChartSingleRepoId.length > 0 && analysisDataByRepo[prChartSingleRepoId] ? prChartSingleRepoId : loadedRepoIds[0]
 
@@ -2024,11 +2176,11 @@ function App() {
     }
 
     if (prChartScopeMode === 'multi') {
-      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
+      return prChartMultiRepoValue
     }
 
     return loadedRepoIds
-  }, [analysisDataByRepo, loadedRepoIds, prChartMultiRepoIds, prChartScopeMode, prChartSingleRepoId])
+  }, [analysisDataByRepo, loadedRepoIds, prChartMultiRepoValue, prChartScopeMode, prChartSingleRepoId])
   const prChartRangeResolution = useMemo(
     () => resolveChartDateRangeWithinCore(lastRunRange, prChartStartDay, prChartEndDay),
     [lastRunRange, prChartEndDay, prChartStartDay],
@@ -2074,11 +2226,11 @@ function App() {
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, prChartAggregation])
-  const prChartSingleRepoValue =
-    prChartSingleRepoId.length > 0 && analysisDataByRepo[prChartSingleRepoId] ? prChartSingleRepoId : loadedRepoIds[0] ?? ''
-  const prChartMultiRepoValue = prChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+  const issuesOpenedChartMultiRepoValue = useMemo(
+    () => resolveMultiRepoSelection(issuesOpenedChartMultiRepoIds, loadedRepoIds),
+    [issuesOpenedChartMultiRepoIds, loadedRepoIds],
+  )
   const issuesOpenedChartRepoIds = useMemo(() => {
-    const validMultiRepoIds = issuesOpenedChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
     const effectiveSingleRepoId =
       issuesOpenedChartSingleRepoId.length > 0 && analysisDataByRepo[issuesOpenedChartSingleRepoId]
         ? issuesOpenedChartSingleRepoId
@@ -2089,13 +2241,13 @@ function App() {
     }
 
     if (issuesOpenedChartScopeMode === 'multi') {
-      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
+      return issuesOpenedChartMultiRepoValue
     }
 
     return loadedRepoIds
   }, [
     analysisDataByRepo,
-    issuesOpenedChartMultiRepoIds,
+    issuesOpenedChartMultiRepoValue,
     issuesOpenedChartScopeMode,
     issuesOpenedChartSingleRepoId,
     loadedRepoIds,
@@ -2139,15 +2291,11 @@ function App() {
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, issuesOpenedChartAggregation])
-  const issuesOpenedChartSingleRepoValue =
-    issuesOpenedChartSingleRepoId.length > 0 && analysisDataByRepo[issuesOpenedChartSingleRepoId]
-      ? issuesOpenedChartSingleRepoId
-      : loadedRepoIds[0] ?? ''
-  const issuesOpenedChartMultiRepoValue = issuesOpenedChartMultiRepoIds.filter(
-    (repoId) => analysisDataByRepo[repoId] !== undefined,
+  const issuesClosedChartMultiRepoValue = useMemo(
+    () => resolveMultiRepoSelection(issuesClosedChartMultiRepoIds, loadedRepoIds),
+    [issuesClosedChartMultiRepoIds, loadedRepoIds],
   )
   const issuesClosedChartRepoIds = useMemo(() => {
-    const validMultiRepoIds = issuesClosedChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
     const effectiveSingleRepoId =
       issuesClosedChartSingleRepoId.length > 0 && analysisDataByRepo[issuesClosedChartSingleRepoId]
         ? issuesClosedChartSingleRepoId
@@ -2158,13 +2306,13 @@ function App() {
     }
 
     if (issuesClosedChartScopeMode === 'multi') {
-      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
+      return issuesClosedChartMultiRepoValue
     }
 
     return loadedRepoIds
   }, [
     analysisDataByRepo,
-    issuesClosedChartMultiRepoIds,
+    issuesClosedChartMultiRepoValue,
     issuesClosedChartScopeMode,
     issuesClosedChartSingleRepoId,
     loadedRepoIds,
@@ -2208,15 +2356,11 @@ function App() {
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, issuesClosedChartAggregation])
-  const issuesClosedChartSingleRepoValue =
-    issuesClosedChartSingleRepoId.length > 0 && analysisDataByRepo[issuesClosedChartSingleRepoId]
-      ? issuesClosedChartSingleRepoId
-      : loadedRepoIds[0] ?? ''
-  const issuesClosedChartMultiRepoValue = issuesClosedChartMultiRepoIds.filter(
-    (repoId) => analysisDataByRepo[repoId] !== undefined,
+  const cycleChartMultiRepoValue = useMemo(
+    () => resolveMultiRepoSelection(cycleChartMultiRepoIds, loadedRepoIds),
+    [cycleChartMultiRepoIds, loadedRepoIds],
   )
   const cycleChartRepoIds = useMemo(() => {
-    const validMultiRepoIds = cycleChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
     const effectiveSingleRepoId =
       cycleChartSingleRepoId.length > 0 && analysisDataByRepo[cycleChartSingleRepoId]
         ? cycleChartSingleRepoId
@@ -2227,20 +2371,15 @@ function App() {
     }
 
     if (cycleChartScopeMode === 'multi') {
-      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
+      return cycleChartMultiRepoValue
     }
 
     return loadedRepoIds
-  }, [analysisDataByRepo, cycleChartMultiRepoIds, cycleChartScopeMode, cycleChartSingleRepoId, loadedRepoIds])
+  }, [analysisDataByRepo, cycleChartMultiRepoValue, cycleChartScopeMode, cycleChartSingleRepoId, loadedRepoIds])
   const cycleChartRangeResolution = useMemo(
     () => resolveChartDateRangeWithinCore(lastRunRange, cycleChartStartDay, cycleChartEndDay),
     [cycleChartEndDay, cycleChartStartDay, lastRunRange],
   )
-  const cycleChartSingleRepoValue =
-    cycleChartSingleRepoId.length > 0 && analysisDataByRepo[cycleChartSingleRepoId]
-      ? cycleChartSingleRepoId
-      : loadedRepoIds[0] ?? ''
-  const cycleChartMultiRepoValue = cycleChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
   const cycleChartAggregation = useMemo(() => {
     if (!cycleChartRangeResolution.ok || cycleChartRepoIds.length === 0) {
       return null
@@ -2313,7 +2452,7 @@ function App() {
       return
     }
 
-    const validMultiRepoIds = globalChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+    const validMultiRepoIds = sanitizeMultiRepoSelection(globalChartMultiRepoIds, loadedRepoIds)
 
     setCommitsChartGranularity(globalChartGranularity)
     setCommitsChartScopeMode(globalChartScopeMode)
@@ -2948,7 +3087,7 @@ function App() {
                   setLastRunRange(null)
                   setLastRunRangeLabel('Last 365 days')
                   setCommitsChartGranularity('weekly')
-                  setCommitsChartScopeMode('all')
+                  setCommitsChartScopeMode('multi')
                   setCommitsChartStyle('line')
                   setCommitsChartBreakdownMode('aggregate')
                   setCommitsChartStartDay('')
@@ -2956,7 +3095,7 @@ function App() {
                   setCommitsChartSingleRepoId('')
                   setCommitsChartMultiRepoIds([])
                   setPrChartGranularity('weekly')
-                  setPrChartScopeMode('all')
+                  setPrChartScopeMode('multi')
                   setPrChartStyle('line')
                   setPrChartBreakdownMode('aggregate')
                   setPrChartStartDay('')
@@ -2964,7 +3103,7 @@ function App() {
                   setPrChartSingleRepoId('')
                   setPrChartMultiRepoIds([])
                   setIssuesOpenedChartGranularity('weekly')
-                  setIssuesOpenedChartScopeMode('all')
+                  setIssuesOpenedChartScopeMode('multi')
                   setIssuesOpenedChartStyle('line')
                   setIssuesOpenedChartBreakdownMode('aggregate')
                   setIssuesOpenedChartStartDay('')
@@ -2972,7 +3111,7 @@ function App() {
                   setIssuesOpenedChartSingleRepoId('')
                   setIssuesOpenedChartMultiRepoIds([])
                   setIssuesClosedChartGranularity('weekly')
-                  setIssuesClosedChartScopeMode('all')
+                  setIssuesClosedChartScopeMode('multi')
                   setIssuesClosedChartStyle('line')
                   setIssuesClosedChartBreakdownMode('aggregate')
                   setIssuesClosedChartStartDay('')
@@ -2980,14 +3119,14 @@ function App() {
                   setIssuesClosedChartSingleRepoId('')
                   setIssuesClosedChartMultiRepoIds([])
                   setCycleChartGranularity('weekly')
-                  setCycleChartScopeMode('all')
+                  setCycleChartScopeMode('multi')
                   setCycleChartStartDay('')
                   setCycleChartEndDay('')
                   setCycleChartSingleRepoId('')
                   setCycleChartMultiRepoIds([])
                   setCycleRollingWindow('4')
                   setGlobalChartGranularity('weekly')
-                  setGlobalChartScopeMode('all')
+                  setGlobalChartScopeMode('multi')
                   setGlobalChartStartDay('')
                   setGlobalChartEndDay('')
                   setGlobalChartStyle('line')
@@ -3276,16 +3415,16 @@ function App() {
             </select>
           </label>
           <label>
-            Scope
-            <select
-              value={globalChartScopeMode}
-              onChange={(event) => setGlobalChartScopeMode(event.target.value as CommitsChartScopeMode)}
-              disabled={loadedRepoCount === 0}
-            >
-              <option value="all">All loaded repos</option>
-              <option value="multi">Multi-select repos</option>
-              <option value="single">Single repo</option>
-            </select>
+            Repositories
+            <RepoMultiSelectDropdown
+              options={loadedRepoOptions}
+              selectedRepoIds={globalChartMultiRepoValue}
+              onChange={(nextRepoIds) => {
+                setGlobalChartScopeMode('multi')
+                setGlobalChartMultiRepoIds(nextRepoIds)
+              }}
+              disabled={loadedRepoOptions.length === 0}
+            />
           </label>
           <label>
             Start
@@ -3344,43 +3483,6 @@ function App() {
               <option value="8">8 buckets</option>
             </select>
           </label>
-          {globalChartScopeMode === 'single' && (
-            <label>
-              Repo
-              <select
-                value={globalChartSingleRepoValue}
-                onChange={(event) => setGlobalChartSingleRepoId(event.target.value)}
-                disabled={loadedRepoOptions.length === 0}
-              >
-                {loadedRepoOptions.map((repoOption) => (
-                  <option key={repoOption.repoId} value={repoOption.repoId}>
-                    {repoOption.repoName}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {globalChartScopeMode === 'multi' && (
-            <label>
-              Repo Set
-              <select
-                multiple
-                size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
-                value={globalChartMultiRepoValue}
-                onChange={(event) => {
-                  const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
-                  setGlobalChartMultiRepoIds(selectedValues)
-                }}
-                disabled={loadedRepoOptions.length === 0}
-              >
-                {loadedRepoOptions.map((repoOption) => (
-                  <option key={repoOption.repoId} value={repoOption.repoId}>
-                    {repoOption.repoName}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
         </div>
         <p className={globalFiltersMessageClassName}>
           {globalFiltersMessage.length > 0
@@ -3407,16 +3509,16 @@ function App() {
                 </select>
               </label>
               <label>
-                Scope
-                <select
-                  value={commitsChartScopeMode}
-                  onChange={(event) => setCommitsChartScopeMode(event.target.value as CommitsChartScopeMode)}
-                  disabled={loadedRepoCount === 0}
-                >
-                  <option value="all">All loaded repos</option>
-                  <option value="multi">Multi-select repos</option>
-                  <option value="single">Single repo</option>
-                </select>
+                Repositories
+                <RepoMultiSelectDropdown
+                  options={loadedRepoOptions}
+                  selectedRepoIds={commitsChartMultiRepoValue}
+                  onChange={(nextRepoIds) => {
+                    setCommitsChartScopeMode('multi')
+                    setCommitsChartMultiRepoIds(nextRepoIds)
+                  }}
+                  disabled={loadedRepoOptions.length === 0}
+                />
               </label>
               <label>
                 Start
@@ -3463,43 +3565,6 @@ function App() {
                   <option value="byRepo">Per repo</option>
                 </select>
               </label>
-              {commitsChartScopeMode === 'single' && (
-                <label>
-                  Repo
-                  <select
-                    value={commitsChartSingleRepoValue}
-                    onChange={(event) => setCommitsChartSingleRepoId(event.target.value)}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              {commitsChartScopeMode === 'multi' && (
-                <label>
-                  Repo Set
-                  <select
-                    multiple
-                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
-                    value={commitsChartMultiRepoValue}
-                    onChange={(event) => {
-                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
-                      setCommitsChartMultiRepoIds(selectedValues)
-                    }}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
             </div>
           </div>
           {!commitsChartRangeResolution.ok ? (
@@ -3551,16 +3616,16 @@ function App() {
                 </select>
               </label>
               <label>
-                Scope
-                <select
-                  value={prChartScopeMode}
-                  onChange={(event) => setPrChartScopeMode(event.target.value as CommitsChartScopeMode)}
-                  disabled={loadedRepoCount === 0}
-                >
-                  <option value="all">All loaded repos</option>
-                  <option value="multi">Multi-select repos</option>
-                  <option value="single">Single repo</option>
-                </select>
+                Repositories
+                <RepoMultiSelectDropdown
+                  options={loadedRepoOptions}
+                  selectedRepoIds={prChartMultiRepoValue}
+                  onChange={(nextRepoIds) => {
+                    setPrChartScopeMode('multi')
+                    setPrChartMultiRepoIds(nextRepoIds)
+                  }}
+                  disabled={loadedRepoOptions.length === 0}
+                />
               </label>
               <label>
                 Start
@@ -3607,43 +3672,6 @@ function App() {
                   <option value="byRepo">Per repo</option>
                 </select>
               </label>
-              {prChartScopeMode === 'single' && (
-                <label>
-                  Repo
-                  <select
-                    value={prChartSingleRepoValue}
-                    onChange={(event) => setPrChartSingleRepoId(event.target.value)}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              {prChartScopeMode === 'multi' && (
-                <label>
-                  Repo Set
-                  <select
-                    multiple
-                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
-                    value={prChartMultiRepoValue}
-                    onChange={(event) => {
-                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
-                      setPrChartMultiRepoIds(selectedValues)
-                    }}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
             </div>
           </div>
           {!prChartRangeResolution.ok ? (
@@ -3695,16 +3723,16 @@ function App() {
                 </select>
               </label>
               <label>
-                Scope
-                <select
-                  value={prChartScopeMode}
-                  onChange={(event) => setPrChartScopeMode(event.target.value as CommitsChartScopeMode)}
-                  disabled={loadedRepoCount === 0}
-                >
-                  <option value="all">All loaded repos</option>
-                  <option value="multi">Multi-select repos</option>
-                  <option value="single">Single repo</option>
-                </select>
+                Repositories
+                <RepoMultiSelectDropdown
+                  options={loadedRepoOptions}
+                  selectedRepoIds={prChartMultiRepoValue}
+                  onChange={(nextRepoIds) => {
+                    setPrChartScopeMode('multi')
+                    setPrChartMultiRepoIds(nextRepoIds)
+                  }}
+                  disabled={loadedRepoOptions.length === 0}
+                />
               </label>
               <label>
                 Start
@@ -3751,43 +3779,6 @@ function App() {
                   <option value="byRepo">Per repo</option>
                 </select>
               </label>
-              {prChartScopeMode === 'single' && (
-                <label>
-                  Repo
-                  <select
-                    value={prChartSingleRepoValue}
-                    onChange={(event) => setPrChartSingleRepoId(event.target.value)}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              {prChartScopeMode === 'multi' && (
-                <label>
-                  Repo Set
-                  <select
-                    multiple
-                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
-                    value={prChartMultiRepoValue}
-                    onChange={(event) => {
-                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
-                      setPrChartMultiRepoIds(selectedValues)
-                    }}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
             </div>
           </div>
           {!prChartRangeResolution.ok ? (
@@ -3839,16 +3830,16 @@ function App() {
                 </select>
               </label>
               <label>
-                Scope
-                <select
-                  value={issuesOpenedChartScopeMode}
-                  onChange={(event) => setIssuesOpenedChartScopeMode(event.target.value as CommitsChartScopeMode)}
-                  disabled={loadedRepoCount === 0}
-                >
-                  <option value="all">All loaded repos</option>
-                  <option value="multi">Multi-select repos</option>
-                  <option value="single">Single repo</option>
-                </select>
+                Repositories
+                <RepoMultiSelectDropdown
+                  options={loadedRepoOptions}
+                  selectedRepoIds={issuesOpenedChartMultiRepoValue}
+                  onChange={(nextRepoIds) => {
+                    setIssuesOpenedChartScopeMode('multi')
+                    setIssuesOpenedChartMultiRepoIds(nextRepoIds)
+                  }}
+                  disabled={loadedRepoOptions.length === 0}
+                />
               </label>
               <label>
                 Start
@@ -3895,43 +3886,6 @@ function App() {
                   <option value="byRepo">Per repo</option>
                 </select>
               </label>
-              {issuesOpenedChartScopeMode === 'single' && (
-                <label>
-                  Repo
-                  <select
-                    value={issuesOpenedChartSingleRepoValue}
-                    onChange={(event) => setIssuesOpenedChartSingleRepoId(event.target.value)}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              {issuesOpenedChartScopeMode === 'multi' && (
-                <label>
-                  Repo Set
-                  <select
-                    multiple
-                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
-                    value={issuesOpenedChartMultiRepoValue}
-                    onChange={(event) => {
-                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
-                      setIssuesOpenedChartMultiRepoIds(selectedValues)
-                    }}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
             </div>
           </div>
           {!issuesOpenedChartRangeResolution.ok ? (
@@ -3985,16 +3939,16 @@ function App() {
                 </select>
               </label>
               <label>
-                Scope
-                <select
-                  value={issuesClosedChartScopeMode}
-                  onChange={(event) => setIssuesClosedChartScopeMode(event.target.value as CommitsChartScopeMode)}
-                  disabled={loadedRepoCount === 0}
-                >
-                  <option value="all">All loaded repos</option>
-                  <option value="multi">Multi-select repos</option>
-                  <option value="single">Single repo</option>
-                </select>
+                Repositories
+                <RepoMultiSelectDropdown
+                  options={loadedRepoOptions}
+                  selectedRepoIds={issuesClosedChartMultiRepoValue}
+                  onChange={(nextRepoIds) => {
+                    setIssuesClosedChartScopeMode('multi')
+                    setIssuesClosedChartMultiRepoIds(nextRepoIds)
+                  }}
+                  disabled={loadedRepoOptions.length === 0}
+                />
               </label>
               <label>
                 Start
@@ -4041,43 +3995,6 @@ function App() {
                   <option value="byRepo">Per repo</option>
                 </select>
               </label>
-              {issuesClosedChartScopeMode === 'single' && (
-                <label>
-                  Repo
-                  <select
-                    value={issuesClosedChartSingleRepoValue}
-                    onChange={(event) => setIssuesClosedChartSingleRepoId(event.target.value)}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              {issuesClosedChartScopeMode === 'multi' && (
-                <label>
-                  Repo Set
-                  <select
-                    multiple
-                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
-                    value={issuesClosedChartMultiRepoValue}
-                    onChange={(event) => {
-                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
-                      setIssuesClosedChartMultiRepoIds(selectedValues)
-                    }}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
             </div>
           </div>
           {!issuesClosedChartRangeResolution.ok ? (
@@ -4131,16 +4048,16 @@ function App() {
                 </select>
               </label>
               <label>
-                Scope
-                <select
-                  value={cycleChartScopeMode}
-                  onChange={(event) => setCycleChartScopeMode(event.target.value as CommitsChartScopeMode)}
-                  disabled={loadedRepoCount === 0}
-                >
-                  <option value="all">All loaded repos</option>
-                  <option value="multi">Multi-select repos</option>
-                  <option value="single">Single repo</option>
-                </select>
+                Repositories
+                <RepoMultiSelectDropdown
+                  options={loadedRepoOptions}
+                  selectedRepoIds={cycleChartMultiRepoValue}
+                  onChange={(nextRepoIds) => {
+                    setCycleChartScopeMode('multi')
+                    setCycleChartMultiRepoIds(nextRepoIds)
+                  }}
+                  disabled={loadedRepoOptions.length === 0}
+                />
               </label>
               <label>
                 Start
@@ -4176,43 +4093,6 @@ function App() {
                   <option value="8">8 buckets</option>
                 </select>
               </label>
-              {cycleChartScopeMode === 'single' && (
-                <label>
-                  Repo
-                  <select
-                    value={cycleChartSingleRepoValue}
-                    onChange={(event) => setCycleChartSingleRepoId(event.target.value)}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              {cycleChartScopeMode === 'multi' && (
-                <label>
-                  Repo Set
-                  <select
-                    multiple
-                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
-                    value={cycleChartMultiRepoValue}
-                    onChange={(event) => {
-                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
-                      setCycleChartMultiRepoIds(selectedValues)
-                    }}
-                    disabled={loadedRepoOptions.length === 0}
-                  >
-                    {loadedRepoOptions.map((repoOption) => (
-                      <option key={repoOption.repoId} value={repoOption.repoId}>
-                        {repoOption.repoName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
             </div>
           </div>
           {!cycleChartRangeResolution.ok ? (
