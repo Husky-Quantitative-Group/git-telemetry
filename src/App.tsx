@@ -1340,6 +1340,30 @@ function buildCumulativeChartData(
   })
 }
 
+function formatLegendSeriesTotal(value: number): string {
+  if (!Number.isFinite(value)) {
+    return '0'
+  }
+
+  if (Math.abs(value - Math.round(value)) < 1e-9) {
+    return Math.round(value).toLocaleString()
+  }
+
+  return value.toFixed(1)
+}
+
+function formatTooltipSeriesValue(value: number): string {
+  if (!Number.isFinite(value)) {
+    return '0'
+  }
+
+  if (Math.abs(value - Math.round(value)) < 1e-9) {
+    return Math.round(value).toLocaleString()
+  }
+
+  return value.toFixed(1)
+}
+
 function ActivityLineChart({
   data,
   breakdownMode,
@@ -1366,7 +1390,139 @@ function ActivityLineChart({
 
   const showAggregate = breakdownMode === 'aggregate'
   const showCumulative = chartStyle === 'cumulative'
-  const chartData = showCumulative ? buildCumulativeChartData(data, breakdownMode, lines) : data
+  const lineTotalsByKey = lines.reduce<Record<string, number>>((accumulator, lineConfig) => {
+    const totalForLine = data.reduce((pointAccumulator, point) => {
+      const value = point[lineConfig.dataKey]
+      const numericValue = typeof value === 'number' ? value : Number(value)
+      return pointAccumulator + (Number.isFinite(numericValue) ? numericValue : 0)
+    }, 0)
+
+    accumulator[lineConfig.dataKey] = totalForLine
+    return accumulator
+  }, {})
+
+  const orderedLines = showAggregate
+    ? lines
+    : [...lines].sort((left, right) => {
+        const totalDifference = (lineTotalsByKey[right.dataKey] ?? 0) - (lineTotalsByKey[left.dataKey] ?? 0)
+        if (totalDifference !== 0) {
+          return totalDifference
+        }
+
+        return left.label.localeCompare(right.label)
+      })
+
+  const orderedLegendEntries = orderedLines.map((lineConfig) => ({
+    dataKey: lineConfig.dataKey,
+    label: lineConfig.label,
+    color: lineConfig.color,
+    total: formatLegendSeriesTotal(lineTotalsByKey[lineConfig.dataKey] ?? 0),
+  }))
+
+  const renderOrderedLegend = (legendProps: unknown) => {
+    const payload = ((legendProps as { payload?: Array<{ dataKey?: string; color?: string }> })?.payload ?? []).reduce<
+      Record<string, string>
+    >((accumulator, entry) => {
+      if (typeof entry.dataKey === 'string' && typeof entry.color === 'string') {
+        accumulator[entry.dataKey] = entry.color
+      }
+      return accumulator
+    }, {})
+
+    return (
+      <ul
+        style={{
+          listStyle: 'none',
+          margin: 0,
+          padding: 0,
+          display: 'flex',
+          flexWrap: 'wrap',
+          justifyContent: 'center',
+          gap: '8px 16px',
+        }}
+      >
+        {orderedLegendEntries.map((entry) => (
+          <li key={entry.dataKey} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: CHART_AXIS_COLOR }}>
+            <span
+              aria-hidden="true"
+              style={{
+                display: 'inline-block',
+                width: 12,
+                height: 12,
+                borderRadius: 2,
+                backgroundColor: payload[entry.dataKey] ?? entry.color,
+              }}
+            />
+            <span>{`${entry.label} (${entry.total})`}</span>
+          </li>
+        ))}
+      </ul>
+    )
+  }
+
+  const renderOrderedTooltip = (tooltipProps: unknown) => {
+    const active = (tooltipProps as { active?: boolean })?.active
+    const label = (tooltipProps as { label?: string | number })?.label
+    const rawPayload = (tooltipProps as { payload?: Array<{ dataKey?: string; value?: number | string; color?: string }> })
+      ?.payload
+
+    if (!active || !rawPayload || rawPayload.length === 0) {
+      return null
+    }
+
+    const valueByKey = rawPayload.reduce<Record<string, number>>((accumulator, entry) => {
+      if (typeof entry.dataKey !== 'string') {
+        return accumulator
+      }
+
+      const numericValue = typeof entry.value === 'number' ? entry.value : Number(entry.value)
+      accumulator[entry.dataKey] = Number.isFinite(numericValue) ? numericValue : 0
+      return accumulator
+    }, {})
+
+    const colorByKey = rawPayload.reduce<Record<string, string>>((accumulator, entry) => {
+      if (typeof entry.dataKey === 'string' && typeof entry.color === 'string') {
+        accumulator[entry.dataKey] = entry.color
+      }
+      return accumulator
+    }, {})
+
+    const orderedTooltipEntries = [...orderedLegendEntries]
+      .reverse()
+      .filter((entry) => Object.prototype.hasOwnProperty.call(valueByKey, entry.dataKey))
+
+    return (
+      <div
+        style={{
+          borderRadius: 8,
+          border: `1px solid ${CHART_TOOLTIP_BORDER}`,
+          background: 'var(--surface-raised)',
+          padding: '10px 12px',
+        }}
+      >
+        <p style={{ margin: '0 0 8px 0', color: CHART_TOOLTIP_LABEL, fontWeight: 700 }}>{label}</p>
+        <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 6 }}>
+          {orderedTooltipEntries.map((entry) => (
+            <li key={entry.dataKey} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: CHART_AXIS_COLOR }}>
+              <span
+                aria-hidden="true"
+                style={{
+                  display: 'inline-block',
+                  width: 10,
+                  height: 10,
+                  borderRadius: 2,
+                  backgroundColor: colorByKey[entry.dataKey] ?? entry.color,
+                }}
+              />
+              <span>{`${entry.label}: ${formatTooltipSeriesValue(valueByKey[entry.dataKey] ?? 0)}`}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    )
+  }
+
+  const chartData = showCumulative ? buildCumulativeChartData(data, breakdownMode, orderedLines) : data
   const resolvedAggregateLabel = showCumulative ? `${aggregateLabel} (cumulative)` : aggregateLabel
 
   return (
@@ -1380,12 +1536,13 @@ function ActivityLineChart({
             <Tooltip
               contentStyle={{ borderRadius: 8, border: `1px solid ${CHART_TOOLTIP_BORDER}` }}
               labelStyle={{ color: CHART_TOOLTIP_LABEL, fontWeight: 700 }}
+              content={showAggregate ? undefined : renderOrderedTooltip}
             />
-            <Legend />
+            <Legend content={showAggregate ? undefined : renderOrderedLegend} />
             {showAggregate ? (
               <Bar dataKey="total" name={resolvedAggregateLabel} fill={CHART_AGGREGATE_COLOR} />
             ) : (
-              lines.map((lineConfig) => (
+              orderedLines.map((lineConfig) => (
                 <Bar
                   key={lineConfig.dataKey}
                   dataKey={lineConfig.dataKey}
@@ -1404,8 +1561,9 @@ function ActivityLineChart({
             <Tooltip
               contentStyle={{ borderRadius: 8, border: `1px solid ${CHART_TOOLTIP_BORDER}` }}
               labelStyle={{ color: CHART_TOOLTIP_LABEL, fontWeight: 700 }}
+              content={showAggregate ? undefined : renderOrderedTooltip}
             />
-            <Legend />
+            <Legend content={showAggregate ? undefined : renderOrderedLegend} />
             {showAggregate ? (
               <Area
                 type="monotone"
@@ -1417,7 +1575,7 @@ function ActivityLineChart({
                 strokeWidth={2}
               />
             ) : (
-              lines.map((lineConfig) => (
+              orderedLines.map((lineConfig) => (
                 <Area
                   key={lineConfig.dataKey}
                   type="monotone"
@@ -1440,8 +1598,9 @@ function ActivityLineChart({
             <Tooltip
               contentStyle={{ borderRadius: 8, border: `1px solid ${CHART_TOOLTIP_BORDER}` }}
               labelStyle={{ color: CHART_TOOLTIP_LABEL, fontWeight: 700 }}
+              content={showAggregate ? undefined : renderOrderedTooltip}
             />
-            <Legend />
+            <Legend content={showAggregate ? undefined : renderOrderedLegend} />
             {showAggregate ? (
               <Line
                 type="monotone"
@@ -1453,7 +1612,7 @@ function ActivityLineChart({
                 activeDot={{ r: 5 }}
               />
             ) : (
-              lines.map((lineConfig) => (
+              orderedLines.map((lineConfig) => (
                 <Line
                   key={lineConfig.dataKey}
                   type="monotone"
