@@ -1094,14 +1094,14 @@ function aggregateMergeTimeTrend(
       if (
         Number.isNaN(mergedTime) ||
         Number.isNaN(createdTime) ||
-        mergedTime < rangeStartTime ||
-        mergedTime > rangeEndTime ||
+        createdTime < rangeStartTime ||
+        createdTime > rangeEndTime ||
         mergedTime <= createdTime
       ) {
         continue
       }
 
-      const bucketStartDate = getBucketStartDate(pullRequest.mergedAt, granularity)
+      const bucketStartDate = getBucketStartDate(pullRequest.createdAt, granularity)
       if (!bucketStartDate) {
         continue
       }
