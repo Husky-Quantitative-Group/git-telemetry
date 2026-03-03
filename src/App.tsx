@@ -1,5 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { GITHUB_GRAPHQL_ENDPOINT, GITHUB_REST_ENDPOINT } from './config/env'
 import './App.css'
 
@@ -268,7 +281,7 @@ type AggregationGranularity = 'daily' | 'weekly' | 'monthly'
 type AggregationScope = 'selected' | 'loaded'
 type CommitsChartScopeMode = 'all' | 'multi' | 'single'
 type ChartBreakdownMode = 'aggregate' | 'byRepo'
-type ChartStyle = 'line' | 'bar'
+type ChartStyle = 'line' | 'bar' | 'cumulative'
 
 type AggregatedBucketPoint = {
   bucketStart: string
@@ -1073,6 +1086,40 @@ function buildActivityChartData(series: AggregatedBucketPoint[], repoIds: string
   })
 }
 
+function buildCumulativeChartData(
+  data: ActivityChartDatum[],
+  breakdownMode: ChartBreakdownMode,
+  lines: ActivityChartLine[],
+): ActivityChartDatum[] {
+  const runningBySeries: Record<string, number> = {}
+  let runningTotal = 0
+
+  return data.map((point) => {
+    const nextPoint: ActivityChartDatum = { ...point }
+
+    if (breakdownMode === 'aggregate') {
+      runningTotal += point.total
+      nextPoint.total = runningTotal
+      return nextPoint
+    }
+
+    for (const lineConfig of lines) {
+      const pointValue = point[lineConfig.dataKey]
+      const numericValue = typeof pointValue === 'number' ? pointValue : Number(pointValue)
+      const safeValue = Number.isFinite(numericValue) ? numericValue : 0
+      runningBySeries[lineConfig.dataKey] = (runningBySeries[lineConfig.dataKey] ?? 0) + safeValue
+      nextPoint[lineConfig.dataKey] = runningBySeries[lineConfig.dataKey]
+    }
+
+    nextPoint.total = lines.reduce((accumulator, lineConfig) => {
+      const value = nextPoint[lineConfig.dataKey]
+      return accumulator + (typeof value === 'number' ? value : 0)
+    }, 0)
+
+    return nextPoint
+  })
+}
+
 function ActivityLineChart({
   data,
   breakdownMode,
@@ -1098,12 +1145,75 @@ function ActivityLineChart({
   }
 
   const showAggregate = breakdownMode === 'aggregate'
+  const showCumulative = chartStyle === 'cumulative'
+  const chartData = showCumulative ? buildCumulativeChartData(data, breakdownMode, lines) : data
+  const resolvedAggregateLabel = showCumulative ? `${aggregateLabel} (cumulative)` : aggregateLabel
 
   return (
     <div className="commits-chart-canvas">
       <ResponsiveContainer width="100%" height={320}>
-        {chartStyle === 'line' ? (
-          <LineChart data={data} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
+        {chartStyle === 'bar' ? (
+          <BarChart data={chartData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
+            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <Tooltip
+              contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
+              labelStyle={{ color: '#16210e', fontWeight: 700 }}
+            />
+            <Legend />
+            {showAggregate ? (
+              <Bar dataKey="total" name={resolvedAggregateLabel} fill="#1f7a3a" />
+            ) : (
+              lines.map((lineConfig) => (
+                <Bar
+                  key={lineConfig.dataKey}
+                  dataKey={lineConfig.dataKey}
+                  name={lineConfig.label}
+                  fill={lineConfig.color}
+                  stackId="stack"
+                />
+              ))
+            )}
+          </BarChart>
+        ) : chartStyle === 'cumulative' ? (
+          <AreaChart data={chartData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
+            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <Tooltip
+              contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
+              labelStyle={{ color: '#16210e', fontWeight: 700 }}
+            />
+            <Legend />
+            {showAggregate ? (
+              <Area
+                type="monotone"
+                dataKey="total"
+                name={resolvedAggregateLabel}
+                stroke="#1f7a3a"
+                fill="#1f7a3a"
+                fillOpacity={0.32}
+                strokeWidth={2}
+              />
+            ) : (
+              lines.map((lineConfig) => (
+                <Area
+                  key={lineConfig.dataKey}
+                  type="monotone"
+                  dataKey={lineConfig.dataKey}
+                  name={lineConfig.label}
+                  stroke={lineConfig.color}
+                  fill={lineConfig.color}
+                  fillOpacity={0.32}
+                  strokeWidth={1.8}
+                  stackId="stack"
+                />
+              ))
+            )}
+          </AreaChart>
+        ) : (
+          <LineChart data={chartData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
             <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
             <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
@@ -1116,7 +1226,7 @@ function ActivityLineChart({
               <Line
                 type="monotone"
                 dataKey="total"
-                name={aggregateLabel}
+                name={resolvedAggregateLabel}
                 stroke="#1f7a3a"
                 strokeWidth={2}
                 dot={false}
@@ -1137,30 +1247,6 @@ function ActivityLineChart({
               ))
             )}
           </LineChart>
-        ) : (
-          <BarChart data={data} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
-            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
-            <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
-            <Tooltip
-              contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
-              labelStyle={{ color: '#16210e', fontWeight: 700 }}
-            />
-            <Legend />
-            {showAggregate ? (
-              <Bar dataKey="total" name={aggregateLabel} fill="#1f7a3a" />
-            ) : (
-              lines.map((lineConfig) => (
-                <Bar
-                  key={lineConfig.dataKey}
-                  dataKey={lineConfig.dataKey}
-                  name={lineConfig.label}
-                  fill={lineConfig.color}
-                  stackId="stack"
-                />
-              ))
-            )}
-          </BarChart>
         )}
       </ResponsiveContainer>
     </div>
@@ -3023,6 +3109,7 @@ function App() {
                 >
                   <option value="line">Line</option>
                   <option value="bar">Bar</option>
+                  <option value="cumulative">Cumulative</option>
                 </select>
               </label>
               <label>
@@ -3142,6 +3229,7 @@ function App() {
                 >
                   <option value="line">Line</option>
                   <option value="bar">Bar</option>
+                  <option value="cumulative">Cumulative</option>
                 </select>
               </label>
               <label>
@@ -3261,6 +3349,7 @@ function App() {
                 >
                   <option value="line">Line</option>
                   <option value="bar">Bar</option>
+                  <option value="cumulative">Cumulative</option>
                 </select>
               </label>
               <label>
@@ -3388,6 +3477,7 @@ function App() {
                 >
                   <option value="line">Line</option>
                   <option value="bar">Bar</option>
+                  <option value="cumulative">Cumulative</option>
                 </select>
               </label>
               <label>
@@ -3507,6 +3597,7 @@ function App() {
                 >
                   <option value="line">Line</option>
                   <option value="bar">Bar</option>
+                  <option value="cumulative">Cumulative</option>
                 </select>
               </label>
               <label>
