@@ -265,7 +265,7 @@ type RepoRawAnalysisData = {
 type AggregationGranularity = 'daily' | 'weekly' | 'monthly'
 type AggregationScope = 'selected' | 'loaded'
 type CommitsChartScopeMode = 'all' | 'multi' | 'single'
-type CommitsChartSeriesMode = 'aggregate' | 'byRepo'
+type ChartSeriesMode = 'aggregate' | 'byRepo'
 
 type AggregatedBucketPoint = {
   bucketStart: string
@@ -308,6 +308,14 @@ type AggregatedActivity = {
     issuesClosed: AggregatedBucketPoint[]
   }
   perRepoTotals: AggregatedRepoTotals[]
+}
+
+type MergeTimeTrendPoint = {
+  bucketStart: string
+  bucketLabel: string
+  count: number
+  averageHours: number | null
+  medianHours: number | null
 }
 
 type ViewerValidationData = {
@@ -904,35 +912,118 @@ function aggregateRepositoryActivity(
   }
 }
 
-type CommitsChartLine = {
+function aggregateMergeTimeTrend(
+  analysisByRepo: Record<string, RepoAnalysisData>,
+  repoIds: string[],
+  range: RunDateRange,
+  granularity: AggregationGranularity,
+): MergeTimeTrendPoint[] {
+  const bucketTimeline = createBucketTimeline(range, granularity)
+  const durationBuckets = new Map<string, number[]>()
+
+  for (const bucketStart of bucketTimeline) {
+    durationBuckets.set(bucketStart, [])
+  }
+
+  const rangeStartTime = new Date(range.startIso).valueOf()
+  const rangeEndTime = new Date(range.endIso).valueOf()
+
+  for (const repoId of repoIds) {
+    const repoData = analysisByRepo[repoId]
+    if (!repoData) {
+      continue
+    }
+
+    for (const pullRequest of repoData.pullRequests) {
+      const mergedTime = new Date(pullRequest.mergedAt).valueOf()
+      const createdTime = new Date(pullRequest.createdAt).valueOf()
+      if (
+        Number.isNaN(mergedTime) ||
+        Number.isNaN(createdTime) ||
+        mergedTime < rangeStartTime ||
+        mergedTime > rangeEndTime ||
+        mergedTime <= createdTime
+      ) {
+        continue
+      }
+
+      const bucketStartDate = getBucketStartDate(pullRequest.mergedAt, granularity)
+      if (!bucketStartDate) {
+        continue
+      }
+
+      const bucketKey = bucketStartDate.toISOString()
+      const bucketDurations = durationBuckets.get(bucketKey)
+      if (!bucketDurations) {
+        continue
+      }
+
+      bucketDurations.push((mergedTime - createdTime) / (1000 * 60 * 60))
+    }
+  }
+
+  return bucketTimeline.map((bucketStart) => {
+    const durations = durationBuckets.get(bucketStart) ?? []
+    return {
+      bucketStart,
+      bucketLabel: formatBucketLabel(bucketStart, granularity),
+      count: durations.length,
+      averageHours: calculateAverage(durations),
+      medianHours: calculateMedian(durations),
+    }
+  })
+}
+
+type ActivityChartLine = {
   dataKey: string
   label: string
   color: string
 }
 
-type CommitsChartDatum = {
+type ActivityChartDatum = {
   bucketStart: string
   bucketLabel: string
   total: number
   [repoSeriesKey: string]: number | string
 }
 
-function CommitsLineChart({
+function buildActivityChartData(series: AggregatedBucketPoint[], repoIds: string[]): ActivityChartDatum[] {
+  return series.map((point) => {
+    const chartPoint: ActivityChartDatum = {
+      bucketStart: point.bucketStart,
+      bucketLabel: point.bucketLabel,
+      total: point.total,
+    }
+
+    for (const repoId of repoIds) {
+      const key = `repo:${repoId}`
+      chartPoint[key] = point.byRepo[repoId] ?? 0
+    }
+
+    return chartPoint
+  })
+}
+
+function ActivityLineChart({
   data,
   seriesMode,
   lines,
+  aggregateLabel,
+  emptyMessage,
 }: {
-  data: CommitsChartDatum[]
-  seriesMode: CommitsChartSeriesMode
-  lines: CommitsChartLine[]
+  data: ActivityChartDatum[]
+  seriesMode: ChartSeriesMode
+  lines: ActivityChartLine[]
+  aggregateLabel: string
+  emptyMessage: string
 }) {
   if (data.length === 0) {
-    return <p className="commits-chart-empty">No commit buckets in this range.</p>
+    return <p className="commits-chart-empty">{emptyMessage}</p>
   }
 
   const hasPerRepoLines = lines.length > 0
   if (seriesMode === 'byRepo' && !hasPerRepoLines) {
-    return <p className="commits-chart-empty">No repositories available for per-repo commit series.</p>
+    return <p className="commits-chart-empty">No repositories available for per-repo series.</p>
   }
 
   return (
@@ -951,7 +1042,7 @@ function CommitsLineChart({
             <Line
               type="monotone"
               dataKey="total"
-              name="Total commits"
+              name={aggregateLabel}
               stroke="#1f7a3a"
               strokeWidth={2}
               dot={false}
@@ -1052,9 +1143,14 @@ function App() {
   const [aggregationScope, setAggregationScope] = useState<AggregationScope>('selected')
   const [commitsChartGranularity, setCommitsChartGranularity] = useState<AggregationGranularity>('weekly')
   const [commitsChartScopeMode, setCommitsChartScopeMode] = useState<CommitsChartScopeMode>('all')
-  const [commitsChartSeriesMode, setCommitsChartSeriesMode] = useState<CommitsChartSeriesMode>('aggregate')
+  const [commitsChartSeriesMode, setCommitsChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
   const [commitsChartSingleRepoId, setCommitsChartSingleRepoId] = useState('')
   const [commitsChartMultiRepoIds, setCommitsChartMultiRepoIds] = useState<string[]>([])
+  const [prChartGranularity, setPrChartGranularity] = useState<AggregationGranularity>('weekly')
+  const [prChartScopeMode, setPrChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [prChartSeriesMode, setPrChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
+  const [prChartSingleRepoId, setPrChartSingleRepoId] = useState('')
+  const [prChartMultiRepoIds, setPrChartMultiRepoIds] = useState<string[]>([])
   const [rateLimitSnapshot, setRateLimitSnapshot] = useState<RateLimitSnapshot | null>(null)
   const [analysisDataByRepo, setAnalysisDataByRepo] = useState<Record<string, RepoAnalysisData>>({})
   const runSequenceRef = useRef(0)
@@ -1389,6 +1485,11 @@ function App() {
     setCommitsChartSeriesMode('aggregate')
     setCommitsChartSingleRepoId('')
     setCommitsChartMultiRepoIds([])
+    setPrChartGranularity('weekly')
+    setPrChartScopeMode('all')
+    setPrChartSeriesMode('aggregate')
+    setPrChartSingleRepoId('')
+    setPrChartMultiRepoIds([])
     setRateLimitSnapshot(null)
     setAnalysisDataByRepo({})
     setRepoDiscoveryStatus({
@@ -1506,32 +1607,22 @@ function App() {
     return aggregateRepositoryActivity(analysisDataByRepo, aggregationRepoIds, lastRunRange, aggregationGranularity)
   }, [analysisDataByRepo, aggregationGranularity, aggregationRepoIds, lastRunRange])
   const commitsChartRepoIds = useMemo(() => {
+    const validMultiRepoIds = commitsChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
     const effectiveSingleRepoId =
       commitsChartSingleRepoId.length > 0 && analysisDataByRepo[commitsChartSingleRepoId]
         ? commitsChartSingleRepoId
         : loadedRepoIds[0]
-    const effectiveMultiRepoIds = commitsChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
 
     if (commitsChartScopeMode === 'single') {
-      if (effectiveSingleRepoId) {
-        return [effectiveSingleRepoId]
-      }
-
-      return []
+      return effectiveSingleRepoId ? [effectiveSingleRepoId] : []
     }
 
     if (commitsChartScopeMode === 'multi') {
-      return effectiveMultiRepoIds.length > 0 ? effectiveMultiRepoIds : loadedRepoIds
+      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
     }
 
     return loadedRepoIds
-  }, [
-    analysisDataByRepo,
-    commitsChartMultiRepoIds,
-    commitsChartScopeMode,
-    commitsChartSingleRepoId,
-    loadedRepoIds,
-  ])
+  }, [analysisDataByRepo, commitsChartMultiRepoIds, commitsChartScopeMode, commitsChartSingleRepoId, loadedRepoIds])
   const commitsChartAggregation = useMemo(() => {
     if (!lastRunRange || commitsChartRepoIds.length === 0) {
       return null
@@ -1541,27 +1632,14 @@ function App() {
   }, [analysisDataByRepo, commitsChartGranularity, commitsChartRepoIds, lastRunRange])
   const commitsChartData = useMemo(() => {
     if (!commitsChartAggregation) {
-      return [] as CommitsChartDatum[]
+      return [] as ActivityChartDatum[]
     }
 
-    return commitsChartAggregation.series.commits.map((point) => {
-      const chartPoint: CommitsChartDatum = {
-        bucketStart: point.bucketStart,
-        bucketLabel: point.bucketLabel,
-        total: point.total,
-      }
-
-      for (const repoId of commitsChartAggregation.repoIds) {
-        const key = `repo:${repoId}`
-        chartPoint[key] = point.byRepo[repoId] ?? 0
-      }
-
-      return chartPoint
-    })
+    return buildActivityChartData(commitsChartAggregation.series.commits, commitsChartAggregation.repoIds)
   }, [commitsChartAggregation])
   const commitsChartLines = useMemo(() => {
     if (!commitsChartAggregation) {
-      return [] as CommitsChartLine[]
+      return [] as ActivityChartLine[]
     }
 
     return commitsChartAggregation.repoIds.map((repoId, index) => ({
@@ -1576,6 +1654,67 @@ function App() {
       : loadedRepoIds[0] ?? ''
   const commitsChartMultiRepoValue = commitsChartMultiRepoIds.filter(
     (repoId) => analysisDataByRepo[repoId] !== undefined,
+  )
+  const prChartRepoIds = useMemo(() => {
+    const validMultiRepoIds = prChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+    const effectiveSingleRepoId =
+      prChartSingleRepoId.length > 0 && analysisDataByRepo[prChartSingleRepoId] ? prChartSingleRepoId : loadedRepoIds[0]
+
+    if (prChartScopeMode === 'single') {
+      return effectiveSingleRepoId ? [effectiveSingleRepoId] : []
+    }
+
+    if (prChartScopeMode === 'multi') {
+      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
+    }
+
+    return loadedRepoIds
+  }, [analysisDataByRepo, loadedRepoIds, prChartMultiRepoIds, prChartScopeMode, prChartSingleRepoId])
+  const prChartAggregation = useMemo(() => {
+    if (!lastRunRange || prChartRepoIds.length === 0) {
+      return null
+    }
+
+    return aggregateRepositoryActivity(analysisDataByRepo, prChartRepoIds, lastRunRange, prChartGranularity)
+  }, [analysisDataByRepo, lastRunRange, prChartGranularity, prChartRepoIds])
+  const prChartData = useMemo(() => {
+    if (!prChartAggregation) {
+      return [] as ActivityChartDatum[]
+    }
+
+    return buildActivityChartData(prChartAggregation.series.prsMerged, prChartAggregation.repoIds)
+  }, [prChartAggregation])
+  const prChartLines = useMemo(() => {
+    if (!prChartAggregation) {
+      return [] as ActivityChartLine[]
+    }
+
+    return prChartAggregation.repoIds.map((repoId, index) => ({
+      dataKey: `repo:${repoId}`,
+      label: analysisDataByRepo[repoId]?.repoName ?? repoId,
+      color: CHART_COLORS[index % CHART_COLORS.length],
+    }))
+  }, [analysisDataByRepo, prChartAggregation])
+  const prChartSingleRepoValue =
+    prChartSingleRepoId.length > 0 && analysisDataByRepo[prChartSingleRepoId] ? prChartSingleRepoId : loadedRepoIds[0] ?? ''
+  const prChartMultiRepoValue = prChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+  const prMergeTimeTrend = useMemo(() => {
+    if (!lastRunRange || prChartRepoIds.length === 0) {
+      return [] as MergeTimeTrendPoint[]
+    }
+
+    return aggregateMergeTimeTrend(analysisDataByRepo, prChartRepoIds, lastRunRange, prChartGranularity)
+  }, [analysisDataByRepo, lastRunRange, prChartGranularity, prChartRepoIds])
+  const prMergeTimeTrendData = useMemo(
+    () =>
+      prMergeTimeTrend.map((point) => ({
+        bucketStart: point.bucketStart,
+        bucketLabel: point.bucketLabel,
+        averageHours: point.averageHours,
+        medianHours: point.medianHours,
+        count: point.count,
+      })),
+    [prMergeTimeTrend],
   )
 
   function handleToggleRepositorySelection(repoId: string) {
@@ -2167,6 +2306,11 @@ function App() {
                   setCommitsChartSeriesMode('aggregate')
                   setCommitsChartSingleRepoId('')
                   setCommitsChartMultiRepoIds([])
+                  setPrChartGranularity('weekly')
+                  setPrChartScopeMode('all')
+                  setPrChartSeriesMode('aggregate')
+                  setPrChartSingleRepoId('')
+                  setPrChartMultiRepoIds([])
                   setRateLimitSnapshot(null)
                   setAnalysisDataByRepo({})
                   setRepoDiscoveryStatus({
@@ -2549,7 +2693,7 @@ function App() {
                 Series
                 <select
                   value={commitsChartSeriesMode}
-                  onChange={(event) => setCommitsChartSeriesMode(event.target.value as CommitsChartSeriesMode)}
+                  onChange={(event) => setCommitsChartSeriesMode(event.target.value as ChartSeriesMode)}
                   disabled={loadedRepoCount === 0}
                 >
                   <option value="aggregate">Aggregate line</option>
@@ -2611,10 +2755,12 @@ function App() {
                   <strong>{commitsChartAggregation.series.commits.length}</strong>
                 </div>
               </div>
-              <CommitsLineChart
+              <ActivityLineChart
                 data={commitsChartData}
                 seriesMode={commitsChartSeriesMode}
                 lines={commitsChartLines}
+                aggregateLabel="Total commits"
+                emptyMessage="No commit buckets in this range."
               />
             </>
           ) : (
@@ -2622,7 +2768,173 @@ function App() {
           )}
         </section>
 
-        {['Pull Requests', 'Issues', 'Cycle Time'].map((section) => (
+        <section className="panel dashboard-section" key="Pull Requests">
+          <div className="dashboard-section-header">
+            <h2>Pull Requests</h2>
+            <div className="chart-control-bar">
+              <label>
+                Granularity
+                <select
+                  value={prChartGranularity}
+                  onChange={(event) => setPrChartGranularity(event.target.value as AggregationGranularity)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <label>
+                Scope
+                <select
+                  value={prChartScopeMode}
+                  onChange={(event) => setPrChartScopeMode(event.target.value as CommitsChartScopeMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="all">All loaded repos</option>
+                  <option value="multi">Multi-select repos</option>
+                  <option value="single">Single repo</option>
+                </select>
+              </label>
+              <label>
+                Series
+                <select
+                  value={prChartSeriesMode}
+                  onChange={(event) => setPrChartSeriesMode(event.target.value as ChartSeriesMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Aggregate line</option>
+                  <option value="byRepo">Per-repo lines</option>
+                </select>
+              </label>
+              {prChartScopeMode === 'single' && (
+                <label>
+                  Repo
+                  <select
+                    value={prChartSingleRepoValue}
+                    onChange={(event) => setPrChartSingleRepoId(event.target.value)}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {prChartScopeMode === 'multi' && (
+                <label>
+                  Repo Set
+                  <select
+                    multiple
+                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
+                    value={prChartMultiRepoValue}
+                    onChange={(event) => {
+                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
+                      setPrChartMultiRepoIds(selectedValues)
+                    }}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          </div>
+          {prChartAggregation ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <p>PRs Merged</p>
+                  <strong>{prChartAggregation.totals.prsMerged}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Merge Avg (hrs)</p>
+                  <strong>
+                    {prChartAggregation.mergeTime.averageHours === null
+                      ? '-'
+                      : prChartAggregation.mergeTime.averageHours.toFixed(1)}
+                  </strong>
+                </div>
+                <div className="stat-card">
+                  <p>Merge Median (hrs)</p>
+                  <strong>
+                    {prChartAggregation.mergeTime.medianHours === null
+                      ? '-'
+                      : prChartAggregation.mergeTime.medianHours.toFixed(1)}
+                  </strong>
+                </div>
+                <div className="stat-card">
+                  <p>Merge Samples</p>
+                  <strong>{prChartAggregation.mergeTime.count}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Draft to Ready</p>
+                  <strong>N/A</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Draft to Ready Note</p>
+                  <strong>Not fetched yet</strong>
+                </div>
+              </div>
+              <ActivityLineChart
+                data={prChartData}
+                seriesMode={prChartSeriesMode}
+                lines={prChartLines}
+                aggregateLabel="Merged PRs"
+                emptyMessage="No merged PR buckets in this range."
+              />
+              <div className="pr-trend-card">
+                <h3>PR Merge Time Trend (hours)</h3>
+                {prMergeTimeTrendData.length === 0 ? (
+                  <p className="commits-chart-empty">No merge-time trend points in this range.</p>
+                ) : (
+                  <div className="commits-chart-canvas">
+                    <ResponsiveContainer width="100%" height={300}>
+                      <LineChart data={prMergeTimeTrendData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
+                        <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
+                        <YAxis tick={{ fill: '#47603a', fontSize: 12 }} />
+                        <Tooltip
+                          contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
+                          labelStyle={{ color: '#16210e', fontWeight: 700 }}
+                        />
+                        <Legend />
+                        <Line
+                          type="monotone"
+                          dataKey="averageHours"
+                          name="Average hours"
+                          stroke="#1f5d8b"
+                          strokeWidth={2}
+                          dot={false}
+                          activeDot={{ r: 4 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="medianHours"
+                          name="Median hours"
+                          stroke="#8b651b"
+                          strokeWidth={2}
+                          dot={false}
+                          activeDot={{ r: 4 }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="chart-placeholder">Run analysis to generate PR charts.</div>
+          )}
+        </section>
+
+        {['Issues', 'Cycle Time'].map((section) => (
           <section className="panel dashboard-section" key={section}>
             <h2>{section}</h2>
             <p>Charts and controls will be added in upcoming checkpoints.</p>

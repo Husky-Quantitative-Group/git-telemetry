@@ -670,6 +670,18 @@
   color: var(--text-secondary);
 }
 
+.pr-trend-card {
+  margin-top: 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgb(255 255 255 / 80%);
+  padding: 0.65rem;
+}
+
+.pr-trend-card h3 {
+  margin: 0;
+}
+
 .chart-placeholder {
   margin-top: 0.75rem;
   border-radius: 12px;
