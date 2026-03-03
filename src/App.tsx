@@ -813,6 +813,24 @@ function calculateMedian(values: number[]): number | null {
   return sorted[middleIndex]
 }
 
+function getGranularityUnit(granularity: AggregationGranularity): 'day' | 'week' | 'month' {
+  if (granularity === 'daily') {
+    return 'day'
+  }
+  if (granularity === 'weekly') {
+    return 'week'
+  }
+  return 'month'
+}
+
+function calculatePerTimeStats(series: AggregatedBucketPoint[]): { average: number | null; median: number | null } {
+  const values = series.map((point) => point.total)
+  return {
+    average: calculateAverage(values),
+    median: calculateMedian(values),
+  }
+}
+
 function aggregateRepositoryActivity(
   analysisByRepo: Record<string, RepoAnalysisData>,
   repoIds: string[],
@@ -1920,6 +1938,11 @@ function App() {
 
     return buildActivityChartData(commitsChartAggregation.series.commits, commitsChartAggregation.repoIds)
   }, [commitsChartAggregation])
+  const commitsUnit = useMemo(() => getGranularityUnit(commitsChartGranularity), [commitsChartGranularity])
+  const commitsPerTimeStats = useMemo(
+    () => calculatePerTimeStats(commitsChartAggregation?.series.commits ?? []),
+    [commitsChartAggregation],
+  )
   const commitsChartLines = useMemo(() => {
     if (!commitsChartAggregation) {
       return [] as ActivityChartLine[]
@@ -1978,6 +2001,15 @@ function App() {
 
     return buildActivityChartData(prChartAggregation.series.prsOpened, prChartAggregation.repoIds)
   }, [prChartAggregation])
+  const prUnit = useMemo(() => getGranularityUnit(prChartGranularity), [prChartGranularity])
+  const prOpenedPerTimeStats = useMemo(
+    () => calculatePerTimeStats(prChartAggregation?.series.prsOpened ?? []),
+    [prChartAggregation],
+  )
+  const prMergedPerTimeStats = useMemo(
+    () => calculatePerTimeStats(prChartAggregation?.series.prsMerged ?? []),
+    [prChartAggregation],
+  )
   const prChartLines = useMemo(() => {
     if (!prChartAggregation) {
       return [] as ActivityChartLine[]
@@ -2038,6 +2070,11 @@ function App() {
 
     return buildActivityChartData(issuesOpenedChartAggregation.series.issuesOpened, issuesOpenedChartAggregation.repoIds)
   }, [issuesOpenedChartAggregation])
+  const issuesOpenedUnit = useMemo(() => getGranularityUnit(issuesOpenedChartGranularity), [issuesOpenedChartGranularity])
+  const issuesOpenedPerTimeStats = useMemo(
+    () => calculatePerTimeStats(issuesOpenedChartAggregation?.series.issuesOpened ?? []),
+    [issuesOpenedChartAggregation],
+  )
   const issuesOpenedChartLines = useMemo(() => {
     if (!issuesOpenedChartAggregation) {
       return [] as ActivityChartLine[]
@@ -2102,6 +2139,11 @@ function App() {
 
     return buildActivityChartData(issuesClosedChartAggregation.series.issuesClosed, issuesClosedChartAggregation.repoIds)
   }, [issuesClosedChartAggregation])
+  const issuesClosedUnit = useMemo(() => getGranularityUnit(issuesClosedChartGranularity), [issuesClosedChartGranularity])
+  const issuesClosedPerTimeStats = useMemo(
+    () => calculatePerTimeStats(issuesClosedChartAggregation?.series.issuesClosed ?? []),
+    [issuesClosedChartAggregation],
+  )
   const issuesClosedChartLines = useMemo(() => {
     if (!issuesClosedChartAggregation) {
       return [] as ActivityChartLine[]
@@ -2174,6 +2216,11 @@ function App() {
   const cycleMergeTimeTrendData = useMemo(
     () => buildMergeTimeTrendChartData(cycleMergeTimeTrend, cycleRollingWindowSize),
     [cycleMergeTimeTrend, cycleRollingWindowSize],
+  )
+  const cycleUnit = useMemo(() => getGranularityUnit(cycleChartGranularity), [cycleChartGranularity])
+  const cyclePerTimeStats = useMemo(
+    () => calculatePerTimeStats(cycleChartAggregation?.series.prsMerged ?? []),
+    [cycleChartAggregation],
   )
 
   function handleToggleRepositorySelection(repoId: string) {
@@ -3205,12 +3252,12 @@ function App() {
                   <strong>{commitsChartAggregation.totals.commits}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Repo Scope</p>
-                  <strong>{commitsChartAggregation.repoIds.length}</strong>
+                  <p>Avg commits / {commitsUnit}</p>
+                  <strong>{commitsPerTimeStats.average === null ? '-' : commitsPerTimeStats.average.toFixed(1)}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Bucket Count</p>
-                  <strong>{commitsChartAggregation.series.commits.length}</strong>
+                  <p>Median commits / {commitsUnit}</p>
+                  <strong>{commitsPerTimeStats.median === null ? '-' : commitsPerTimeStats.median.toFixed(1)}</strong>
                 </div>
               </div>
               <ActivityLineChart
@@ -3349,12 +3396,12 @@ function App() {
                   <strong>{prChartAggregation.totals.prsOpened}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Repo Scope</p>
-                  <strong>{prChartAggregation.repoIds.length}</strong>
+                  <p>Avg PRs opened / {prUnit}</p>
+                  <strong>{prOpenedPerTimeStats.average === null ? '-' : prOpenedPerTimeStats.average.toFixed(1)}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Bucket Count</p>
-                  <strong>{prChartAggregation.series.prsOpened.length}</strong>
+                  <p>Median PRs opened / {prUnit}</p>
+                  <strong>{prOpenedPerTimeStats.median === null ? '-' : prOpenedPerTimeStats.median.toFixed(1)}</strong>
                 </div>
               </div>
               <ActivityLineChart
@@ -3493,20 +3540,12 @@ function App() {
                   <strong>{prChartAggregation.totals.prsMerged}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Repo Scope</p>
-                  <strong>{prChartAggregation.repoIds.length}</strong>
+                  <p>Avg PRs merged / {prUnit}</p>
+                  <strong>{prMergedPerTimeStats.average === null ? '-' : prMergedPerTimeStats.average.toFixed(1)}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Bucket Count</p>
-                  <strong>{prChartAggregation.series.prsMerged.length}</strong>
-                </div>
-                <div className="stat-card">
-                  <p>Draft to Ready</p>
-                  <strong>N/A</strong>
-                </div>
-                <div className="stat-card">
-                  <p>Draft to Ready Note</p>
-                  <strong>Not fetched yet</strong>
+                  <p>Median PRs merged / {prUnit}</p>
+                  <strong>{prMergedPerTimeStats.median === null ? '-' : prMergedPerTimeStats.median.toFixed(1)}</strong>
                 </div>
               </div>
               <ActivityLineChart
@@ -3645,12 +3684,14 @@ function App() {
                   <strong>{issuesOpenedChartAggregation.totals.issuesOpened}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Repo Scope</p>
-                  <strong>{issuesOpenedChartAggregation.repoIds.length}</strong>
+                  <p>Avg issues opened / {issuesOpenedUnit}</p>
+                  <strong>
+                    {issuesOpenedPerTimeStats.average === null ? '-' : issuesOpenedPerTimeStats.average.toFixed(1)}
+                  </strong>
                 </div>
                 <div className="stat-card">
-                  <p>Bucket Count</p>
-                  <strong>{issuesOpenedChartAggregation.series.issuesOpened.length}</strong>
+                  <p>Median issues opened / {issuesOpenedUnit}</p>
+                  <strong>{issuesOpenedPerTimeStats.median === null ? '-' : issuesOpenedPerTimeStats.median.toFixed(1)}</strong>
                 </div>
               </div>
               <ActivityLineChart
@@ -3789,12 +3830,14 @@ function App() {
                   <strong>{issuesClosedChartAggregation.totals.issuesClosed}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Repo Scope</p>
-                  <strong>{issuesClosedChartAggregation.repoIds.length}</strong>
+                  <p>Avg issues closed / {issuesClosedUnit}</p>
+                  <strong>
+                    {issuesClosedPerTimeStats.average === null ? '-' : issuesClosedPerTimeStats.average.toFixed(1)}
+                  </strong>
                 </div>
                 <div className="stat-card">
-                  <p>Bucket Count</p>
-                  <strong>{issuesClosedChartAggregation.series.issuesClosed.length}</strong>
+                  <p>Median issues closed / {issuesClosedUnit}</p>
+                  <strong>{issuesClosedPerTimeStats.median === null ? '-' : issuesClosedPerTimeStats.median.toFixed(1)}</strong>
                 </div>
               </div>
               <ActivityLineChart
@@ -3938,8 +3981,12 @@ function App() {
                   <strong>{cycleChartAggregation.mergeTime.count}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Repo Scope</p>
-                  <strong>{cycleChartAggregation.repoIds.length}</strong>
+                  <p>Avg merged PRs / {cycleUnit}</p>
+                  <strong>{cyclePerTimeStats.average === null ? '-' : cyclePerTimeStats.average.toFixed(1)}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Median merged PRs / {cycleUnit}</p>
+                  <strong>{cyclePerTimeStats.median === null ? '-' : cyclePerTimeStats.median.toFixed(1)}</strong>
                 </div>
               </div>
               <div className="pr-trend-card">
