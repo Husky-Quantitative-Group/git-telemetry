@@ -1219,6 +1219,16 @@ function App() {
   const [prChartSeriesMode, setPrChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
   const [prChartSingleRepoId, setPrChartSingleRepoId] = useState('')
   const [prChartMultiRepoIds, setPrChartMultiRepoIds] = useState<string[]>([])
+  const [issuesOpenedChartGranularity, setIssuesOpenedChartGranularity] = useState<AggregationGranularity>('weekly')
+  const [issuesOpenedChartScopeMode, setIssuesOpenedChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [issuesOpenedChartSeriesMode, setIssuesOpenedChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
+  const [issuesOpenedChartSingleRepoId, setIssuesOpenedChartSingleRepoId] = useState('')
+  const [issuesOpenedChartMultiRepoIds, setIssuesOpenedChartMultiRepoIds] = useState<string[]>([])
+  const [issuesClosedChartGranularity, setIssuesClosedChartGranularity] = useState<AggregationGranularity>('weekly')
+  const [issuesClosedChartScopeMode, setIssuesClosedChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [issuesClosedChartSeriesMode, setIssuesClosedChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
+  const [issuesClosedChartSingleRepoId, setIssuesClosedChartSingleRepoId] = useState('')
+  const [issuesClosedChartMultiRepoIds, setIssuesClosedChartMultiRepoIds] = useState<string[]>([])
   const [cycleChartGranularity, setCycleChartGranularity] = useState<AggregationGranularity>('weekly')
   const [cycleChartScopeMode, setCycleChartScopeMode] = useState<CommitsChartScopeMode>('all')
   const [cycleChartSingleRepoId, setCycleChartSingleRepoId] = useState('')
@@ -1778,6 +1788,126 @@ function App() {
   const prChartSingleRepoValue =
     prChartSingleRepoId.length > 0 && analysisDataByRepo[prChartSingleRepoId] ? prChartSingleRepoId : loadedRepoIds[0] ?? ''
   const prChartMultiRepoValue = prChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+  const issuesOpenedChartRepoIds = useMemo(() => {
+    const validMultiRepoIds = issuesOpenedChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+    const effectiveSingleRepoId =
+      issuesOpenedChartSingleRepoId.length > 0 && analysisDataByRepo[issuesOpenedChartSingleRepoId]
+        ? issuesOpenedChartSingleRepoId
+        : loadedRepoIds[0]
+
+    if (issuesOpenedChartScopeMode === 'single') {
+      return effectiveSingleRepoId ? [effectiveSingleRepoId] : []
+    }
+
+    if (issuesOpenedChartScopeMode === 'multi') {
+      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
+    }
+
+    return loadedRepoIds
+  }, [
+    analysisDataByRepo,
+    issuesOpenedChartMultiRepoIds,
+    issuesOpenedChartScopeMode,
+    issuesOpenedChartSingleRepoId,
+    loadedRepoIds,
+  ])
+  const issuesOpenedChartAggregation = useMemo(() => {
+    if (!lastRunRange || issuesOpenedChartRepoIds.length === 0) {
+      return null
+    }
+
+    return aggregateRepositoryActivity(
+      analysisDataByRepo,
+      issuesOpenedChartRepoIds,
+      lastRunRange,
+      issuesOpenedChartGranularity,
+    )
+  }, [analysisDataByRepo, issuesOpenedChartGranularity, issuesOpenedChartRepoIds, lastRunRange])
+  const issuesOpenedChartData = useMemo(() => {
+    if (!issuesOpenedChartAggregation) {
+      return [] as ActivityChartDatum[]
+    }
+
+    return buildActivityChartData(issuesOpenedChartAggregation.series.issuesOpened, issuesOpenedChartAggregation.repoIds)
+  }, [issuesOpenedChartAggregation])
+  const issuesOpenedChartLines = useMemo(() => {
+    if (!issuesOpenedChartAggregation) {
+      return [] as ActivityChartLine[]
+    }
+
+    return issuesOpenedChartAggregation.repoIds.map((repoId, index) => ({
+      dataKey: `repo:${repoId}`,
+      label: analysisDataByRepo[repoId]?.repoName ?? repoId,
+      color: CHART_COLORS[index % CHART_COLORS.length],
+    }))
+  }, [analysisDataByRepo, issuesOpenedChartAggregation])
+  const issuesOpenedChartSingleRepoValue =
+    issuesOpenedChartSingleRepoId.length > 0 && analysisDataByRepo[issuesOpenedChartSingleRepoId]
+      ? issuesOpenedChartSingleRepoId
+      : loadedRepoIds[0] ?? ''
+  const issuesOpenedChartMultiRepoValue = issuesOpenedChartMultiRepoIds.filter(
+    (repoId) => analysisDataByRepo[repoId] !== undefined,
+  )
+  const issuesClosedChartRepoIds = useMemo(() => {
+    const validMultiRepoIds = issuesClosedChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+    const effectiveSingleRepoId =
+      issuesClosedChartSingleRepoId.length > 0 && analysisDataByRepo[issuesClosedChartSingleRepoId]
+        ? issuesClosedChartSingleRepoId
+        : loadedRepoIds[0]
+
+    if (issuesClosedChartScopeMode === 'single') {
+      return effectiveSingleRepoId ? [effectiveSingleRepoId] : []
+    }
+
+    if (issuesClosedChartScopeMode === 'multi') {
+      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
+    }
+
+    return loadedRepoIds
+  }, [
+    analysisDataByRepo,
+    issuesClosedChartMultiRepoIds,
+    issuesClosedChartScopeMode,
+    issuesClosedChartSingleRepoId,
+    loadedRepoIds,
+  ])
+  const issuesClosedChartAggregation = useMemo(() => {
+    if (!lastRunRange || issuesClosedChartRepoIds.length === 0) {
+      return null
+    }
+
+    return aggregateRepositoryActivity(
+      analysisDataByRepo,
+      issuesClosedChartRepoIds,
+      lastRunRange,
+      issuesClosedChartGranularity,
+    )
+  }, [analysisDataByRepo, issuesClosedChartGranularity, issuesClosedChartRepoIds, lastRunRange])
+  const issuesClosedChartData = useMemo(() => {
+    if (!issuesClosedChartAggregation) {
+      return [] as ActivityChartDatum[]
+    }
+
+    return buildActivityChartData(issuesClosedChartAggregation.series.issuesClosed, issuesClosedChartAggregation.repoIds)
+  }, [issuesClosedChartAggregation])
+  const issuesClosedChartLines = useMemo(() => {
+    if (!issuesClosedChartAggregation) {
+      return [] as ActivityChartLine[]
+    }
+
+    return issuesClosedChartAggregation.repoIds.map((repoId, index) => ({
+      dataKey: `repo:${repoId}`,
+      label: analysisDataByRepo[repoId]?.repoName ?? repoId,
+      color: CHART_COLORS[index % CHART_COLORS.length],
+    }))
+  }, [analysisDataByRepo, issuesClosedChartAggregation])
+  const issuesClosedChartSingleRepoValue =
+    issuesClosedChartSingleRepoId.length > 0 && analysisDataByRepo[issuesClosedChartSingleRepoId]
+      ? issuesClosedChartSingleRepoId
+      : loadedRepoIds[0] ?? ''
+  const issuesClosedChartMultiRepoValue = issuesClosedChartMultiRepoIds.filter(
+    (repoId) => analysisDataByRepo[repoId] !== undefined,
+  )
   const cycleChartRepoIds = useMemo(() => {
     const validMultiRepoIds = cycleChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
     const effectiveSingleRepoId =
@@ -3112,10 +3242,218 @@ function App() {
           )}
         </section>
 
-        <section className="panel dashboard-section" key="Issues">
-          <h2>Issues</h2>
-          <p>Charts and controls will be added in upcoming checkpoints.</p>
-          <div className="chart-placeholder">No data yet</div>
+        <section className="panel dashboard-section" key="Issues Opened">
+          <div className="dashboard-section-header">
+            <h2>Issues Opened</h2>
+            <div className="chart-control-bar">
+              <label>
+                Granularity
+                <select
+                  value={issuesOpenedChartGranularity}
+                  onChange={(event) => setIssuesOpenedChartGranularity(event.target.value as AggregationGranularity)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <label>
+                Scope
+                <select
+                  value={issuesOpenedChartScopeMode}
+                  onChange={(event) => setIssuesOpenedChartScopeMode(event.target.value as CommitsChartScopeMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="all">All loaded repos</option>
+                  <option value="multi">Multi-select repos</option>
+                  <option value="single">Single repo</option>
+                </select>
+              </label>
+              <label>
+                Series
+                <select
+                  value={issuesOpenedChartSeriesMode}
+                  onChange={(event) => setIssuesOpenedChartSeriesMode(event.target.value as ChartSeriesMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Aggregate line</option>
+                  <option value="byRepo">Per-repo lines</option>
+                </select>
+              </label>
+              {issuesOpenedChartScopeMode === 'single' && (
+                <label>
+                  Repo
+                  <select
+                    value={issuesOpenedChartSingleRepoValue}
+                    onChange={(event) => setIssuesOpenedChartSingleRepoId(event.target.value)}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {issuesOpenedChartScopeMode === 'multi' && (
+                <label>
+                  Repo Set
+                  <select
+                    multiple
+                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
+                    value={issuesOpenedChartMultiRepoValue}
+                    onChange={(event) => {
+                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
+                      setIssuesOpenedChartMultiRepoIds(selectedValues)
+                    }}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          </div>
+          {issuesOpenedChartAggregation ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <p>Issues Opened</p>
+                  <strong>{issuesOpenedChartAggregation.totals.issuesOpened}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Repo Scope</p>
+                  <strong>{issuesOpenedChartAggregation.repoIds.length}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Bucket Count</p>
+                  <strong>{issuesOpenedChartAggregation.series.issuesOpened.length}</strong>
+                </div>
+              </div>
+              <ActivityLineChart
+                data={issuesOpenedChartData}
+                seriesMode={issuesOpenedChartSeriesMode}
+                lines={issuesOpenedChartLines}
+                aggregateLabel="Issues opened"
+                emptyMessage="No opened issue buckets in this range."
+              />
+            </>
+          ) : (
+            <div className="chart-placeholder">Run analysis to generate opened issue charts.</div>
+          )}
+        </section>
+
+        <section className="panel dashboard-section" key="Issues Closed">
+          <div className="dashboard-section-header">
+            <h2>Issues Closed</h2>
+            <div className="chart-control-bar">
+              <label>
+                Granularity
+                <select
+                  value={issuesClosedChartGranularity}
+                  onChange={(event) => setIssuesClosedChartGranularity(event.target.value as AggregationGranularity)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <label>
+                Scope
+                <select
+                  value={issuesClosedChartScopeMode}
+                  onChange={(event) => setIssuesClosedChartScopeMode(event.target.value as CommitsChartScopeMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="all">All loaded repos</option>
+                  <option value="multi">Multi-select repos</option>
+                  <option value="single">Single repo</option>
+                </select>
+              </label>
+              <label>
+                Series
+                <select
+                  value={issuesClosedChartSeriesMode}
+                  onChange={(event) => setIssuesClosedChartSeriesMode(event.target.value as ChartSeriesMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Aggregate line</option>
+                  <option value="byRepo">Per-repo lines</option>
+                </select>
+              </label>
+              {issuesClosedChartScopeMode === 'single' && (
+                <label>
+                  Repo
+                  <select
+                    value={issuesClosedChartSingleRepoValue}
+                    onChange={(event) => setIssuesClosedChartSingleRepoId(event.target.value)}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {issuesClosedChartScopeMode === 'multi' && (
+                <label>
+                  Repo Set
+                  <select
+                    multiple
+                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
+                    value={issuesClosedChartMultiRepoValue}
+                    onChange={(event) => {
+                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
+                      setIssuesClosedChartMultiRepoIds(selectedValues)
+                    }}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          </div>
+          {issuesClosedChartAggregation ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <p>Issues Closed</p>
+                  <strong>{issuesClosedChartAggregation.totals.issuesClosed}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Repo Scope</p>
+                  <strong>{issuesClosedChartAggregation.repoIds.length}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Bucket Count</p>
+                  <strong>{issuesClosedChartAggregation.series.issuesClosed.length}</strong>
+                </div>
+              </div>
+              <ActivityLineChart
+                data={issuesClosedChartData}
+                seriesMode={issuesClosedChartSeriesMode}
+                lines={issuesClosedChartLines}
+                aggregateLabel="Issues closed"
+                emptyMessage="No closed issue buckets in this range."
+              />
+            </>
+          ) : (
+            <div className="chart-placeholder">Run analysis to generate closed issue charts.</div>
+          )}
         </section>
 
         <section className="panel dashboard-section" key="Cycle Time">
