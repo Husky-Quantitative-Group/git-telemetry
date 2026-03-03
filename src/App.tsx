@@ -278,7 +278,6 @@ type RepoRawAnalysisData = {
 }
 
 type AggregationGranularity = 'daily' | 'weekly' | 'monthly'
-type AggregationScope = 'selected' | 'loaded'
 type CommitsChartScopeMode = 'all' | 'multi' | 'single'
 type ChartBreakdownMode = 'aggregate' | 'byRepo'
 type ChartStyle = 'line' | 'bar' | 'cumulative'
@@ -447,6 +446,67 @@ function getDateDaysAgo(days: number): Date {
   const date = new Date()
   date.setUTCDate(date.getUTCDate() - days)
   return date
+}
+
+function buildRunDateRangeFromDays(startDay: string, endDay: string, label: string): RunDateRange {
+  const startDate = new Date(`${startDay}T00:00:00.000Z`)
+  const endDate = new Date(`${endDay}T23:59:59.999Z`)
+
+  return {
+    startIso: startDate.toISOString(),
+    endIso: endDate.toISOString(),
+    startDay,
+    endDay,
+    label,
+  }
+}
+
+function resolveChartDateRangeWithinCore(
+  coreRange: RunDateRange | null,
+  startDay: string,
+  endDay: string,
+): { ok: true; range: RunDateRange } | { ok: false; message: string } {
+  if (!coreRange) {
+    return {
+      ok: false,
+      message: 'Run analysis to set the core date range.',
+    }
+  }
+
+  if (startDay.length === 0 || endDay.length === 0) {
+    return {
+      ok: false,
+      message: 'Choose both start and end dates.',
+    }
+  }
+
+  const startDate = new Date(`${startDay}T00:00:00.000Z`)
+  const endDate = new Date(`${endDay}T23:59:59.999Z`)
+  if (Number.isNaN(startDate.valueOf()) || Number.isNaN(endDate.valueOf())) {
+    return {
+      ok: false,
+      message: 'Chart date range is invalid.',
+    }
+  }
+
+  if (startDay > endDay) {
+    return {
+      ok: false,
+      message: 'Chart start date must be before end date.',
+    }
+  }
+
+  if (startDay < coreRange.startDay || endDay > coreRange.endDay) {
+    return {
+      ok: false,
+      message: `Chart range must stay within core range (${coreRange.startDay} to ${coreRange.endDay}).`,
+    }
+  }
+
+  return {
+    ok: true,
+    range: buildRunDateRangeFromDays(startDay, endDay, `${startDay} to ${endDay}`),
+  }
 }
 
 function splitRepositoryName(nameWithOwner: string): { owner: string; name: string } | null {
@@ -1316,7 +1376,7 @@ function App() {
   })
   const [runPhase, setRunPhase] = useState<RunPhase>('idle')
   const [currentRunId, setCurrentRunId] = useState<number | null>(null)
-  const [activeStep, setActiveStep] = useState<RunStepKey | null>(null)
+  const [, setActiveStep] = useState<RunStepKey | null>(null)
   const [stepStatuses, setStepStatuses] = useState<StepStatusMap>(() => createStepStatusMap('queued'))
   const [repoMatrixRows, setRepoMatrixRows] = useState<RepoMatrixRow[]>([])
   const [runErrors, setRunErrors] = useState<RunErrorItem[]>([])
@@ -1324,34 +1384,42 @@ function App() {
   const [runFinishedAt, setRunFinishedAt] = useState<number | null>(null)
   const [lastRunRange, setLastRunRange] = useState<RunDateRange | null>(null)
   const [lastRunRangeLabel, setLastRunRangeLabel] = useState<string>('Last 365 days')
-  const [aggregationGranularity, setAggregationGranularity] = useState<AggregationGranularity>('weekly')
-  const [aggregationScope, setAggregationScope] = useState<AggregationScope>('selected')
   const [commitsChartGranularity, setCommitsChartGranularity] = useState<AggregationGranularity>('weekly')
   const [commitsChartScopeMode, setCommitsChartScopeMode] = useState<CommitsChartScopeMode>('all')
   const [commitsChartStyle, setCommitsChartStyle] = useState<ChartStyle>('line')
   const [commitsChartBreakdownMode, setCommitsChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
+  const [commitsChartStartDay, setCommitsChartStartDay] = useState('')
+  const [commitsChartEndDay, setCommitsChartEndDay] = useState('')
   const [commitsChartSingleRepoId, setCommitsChartSingleRepoId] = useState('')
   const [commitsChartMultiRepoIds, setCommitsChartMultiRepoIds] = useState<string[]>([])
   const [prChartGranularity, setPrChartGranularity] = useState<AggregationGranularity>('weekly')
   const [prChartScopeMode, setPrChartScopeMode] = useState<CommitsChartScopeMode>('all')
   const [prChartStyle, setPrChartStyle] = useState<ChartStyle>('line')
   const [prChartBreakdownMode, setPrChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
+  const [prChartStartDay, setPrChartStartDay] = useState('')
+  const [prChartEndDay, setPrChartEndDay] = useState('')
   const [prChartSingleRepoId, setPrChartSingleRepoId] = useState('')
   const [prChartMultiRepoIds, setPrChartMultiRepoIds] = useState<string[]>([])
   const [issuesOpenedChartGranularity, setIssuesOpenedChartGranularity] = useState<AggregationGranularity>('weekly')
   const [issuesOpenedChartScopeMode, setIssuesOpenedChartScopeMode] = useState<CommitsChartScopeMode>('all')
   const [issuesOpenedChartStyle, setIssuesOpenedChartStyle] = useState<ChartStyle>('line')
   const [issuesOpenedChartBreakdownMode, setIssuesOpenedChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
+  const [issuesOpenedChartStartDay, setIssuesOpenedChartStartDay] = useState('')
+  const [issuesOpenedChartEndDay, setIssuesOpenedChartEndDay] = useState('')
   const [issuesOpenedChartSingleRepoId, setIssuesOpenedChartSingleRepoId] = useState('')
   const [issuesOpenedChartMultiRepoIds, setIssuesOpenedChartMultiRepoIds] = useState<string[]>([])
   const [issuesClosedChartGranularity, setIssuesClosedChartGranularity] = useState<AggregationGranularity>('weekly')
   const [issuesClosedChartScopeMode, setIssuesClosedChartScopeMode] = useState<CommitsChartScopeMode>('all')
   const [issuesClosedChartStyle, setIssuesClosedChartStyle] = useState<ChartStyle>('line')
   const [issuesClosedChartBreakdownMode, setIssuesClosedChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
+  const [issuesClosedChartStartDay, setIssuesClosedChartStartDay] = useState('')
+  const [issuesClosedChartEndDay, setIssuesClosedChartEndDay] = useState('')
   const [issuesClosedChartSingleRepoId, setIssuesClosedChartSingleRepoId] = useState('')
   const [issuesClosedChartMultiRepoIds, setIssuesClosedChartMultiRepoIds] = useState<string[]>([])
   const [cycleChartGranularity, setCycleChartGranularity] = useState<AggregationGranularity>('weekly')
   const [cycleChartScopeMode, setCycleChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [cycleChartStartDay, setCycleChartStartDay] = useState('')
+  const [cycleChartEndDay, setCycleChartEndDay] = useState('')
   const [cycleChartSingleRepoId, setCycleChartSingleRepoId] = useState('')
   const [cycleChartMultiRepoIds, setCycleChartMultiRepoIds] = useState<string[]>([])
   const [cycleRollingWindow, setCycleRollingWindow] = useState<'2' | '4' | '8'>('4')
@@ -1432,13 +1500,7 @@ function App() {
 
       return {
         ok: true,
-        range: {
-          startIso: startDate.toISOString(),
-          endIso: endDate.toISOString(),
-          startDay: customRangeStart,
-          endDay: customRangeEnd,
-          label: `${customRangeStart} to ${customRangeEnd}`,
-        },
+        range: buildRunDateRangeFromDays(customRangeStart, customRangeEnd, `${customRangeStart} to ${customRangeEnd}`),
       }
     }
 
@@ -1458,13 +1520,11 @@ function App() {
 
     return {
       ok: true,
-      range: {
-        startIso: startDate.toISOString(),
-        endIso: endDate.toISOString(),
-        startDay: startDate.toISOString().slice(0, 10),
-        endDay: endDate.toISOString().slice(0, 10),
-        label: `Last ${days} days`,
-      },
+      range: buildRunDateRangeFromDays(
+        startDate.toISOString().slice(0, 10),
+        endDate.toISOString().slice(0, 10),
+        `Last ${days} days`,
+      ),
     }
   }
 
@@ -1688,28 +1748,38 @@ function App() {
     setCommitsChartScopeMode('all')
     setCommitsChartStyle('line')
     setCommitsChartBreakdownMode('aggregate')
+    setCommitsChartStartDay('')
+    setCommitsChartEndDay('')
     setCommitsChartSingleRepoId('')
     setCommitsChartMultiRepoIds([])
     setPrChartGranularity('weekly')
     setPrChartScopeMode('all')
     setPrChartStyle('line')
     setPrChartBreakdownMode('aggregate')
+    setPrChartStartDay('')
+    setPrChartEndDay('')
     setPrChartSingleRepoId('')
     setPrChartMultiRepoIds([])
     setIssuesOpenedChartGranularity('weekly')
     setIssuesOpenedChartScopeMode('all')
     setIssuesOpenedChartStyle('line')
     setIssuesOpenedChartBreakdownMode('aggregate')
+    setIssuesOpenedChartStartDay('')
+    setIssuesOpenedChartEndDay('')
     setIssuesOpenedChartSingleRepoId('')
     setIssuesOpenedChartMultiRepoIds([])
     setIssuesClosedChartGranularity('weekly')
     setIssuesClosedChartScopeMode('all')
     setIssuesClosedChartStyle('line')
     setIssuesClosedChartBreakdownMode('aggregate')
+    setIssuesClosedChartStartDay('')
+    setIssuesClosedChartEndDay('')
     setIssuesClosedChartSingleRepoId('')
     setIssuesClosedChartMultiRepoIds([])
     setCycleChartGranularity('weekly')
     setCycleChartScopeMode('all')
+    setCycleChartStartDay('')
+    setCycleChartEndDay('')
     setCycleChartSingleRepoId('')
     setCycleChartMultiRepoIds([])
     setCycleRollingWindow('4')
@@ -1810,25 +1880,6 @@ function App() {
         .sort((left, right) => left.repoName.localeCompare(right.repoName)),
     [analysisDataByRepo, loadedRepoIds],
   )
-  const aggregationRepoIds = useMemo(() => {
-    if (aggregationScope === 'loaded') {
-      return loadedRepoIds
-    }
-
-    const selectedLoaded = selectedRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
-    if (selectedLoaded.length > 0) {
-      return selectedLoaded
-    }
-
-    return loadedRepoIds
-  }, [aggregationScope, loadedRepoIds, selectedRepoIds, analysisDataByRepo])
-  const aggregatedActivity = useMemo(() => {
-    if (!lastRunRange || aggregationRepoIds.length === 0) {
-      return null
-    }
-
-    return aggregateRepositoryActivity(analysisDataByRepo, aggregationRepoIds, lastRunRange, aggregationGranularity)
-  }, [analysisDataByRepo, aggregationGranularity, aggregationRepoIds, lastRunRange])
   const commitsChartRepoIds = useMemo(() => {
     const validMultiRepoIds = commitsChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
     const effectiveSingleRepoId =
@@ -1846,13 +1897,22 @@ function App() {
 
     return loadedRepoIds
   }, [analysisDataByRepo, commitsChartMultiRepoIds, commitsChartScopeMode, commitsChartSingleRepoId, loadedRepoIds])
+  const commitsChartRangeResolution = useMemo(
+    () => resolveChartDateRangeWithinCore(lastRunRange, commitsChartStartDay, commitsChartEndDay),
+    [commitsChartEndDay, commitsChartStartDay, lastRunRange],
+  )
   const commitsChartAggregation = useMemo(() => {
-    if (!lastRunRange || commitsChartRepoIds.length === 0) {
+    if (!commitsChartRangeResolution.ok || commitsChartRepoIds.length === 0) {
       return null
     }
 
-    return aggregateRepositoryActivity(analysisDataByRepo, commitsChartRepoIds, lastRunRange, commitsChartGranularity)
-  }, [analysisDataByRepo, commitsChartGranularity, commitsChartRepoIds, lastRunRange])
+    return aggregateRepositoryActivity(
+      analysisDataByRepo,
+      commitsChartRepoIds,
+      commitsChartRangeResolution.range,
+      commitsChartGranularity,
+    )
+  }, [analysisDataByRepo, commitsChartGranularity, commitsChartRangeResolution, commitsChartRepoIds])
   const commitsChartData = useMemo(() => {
     if (!commitsChartAggregation) {
       return [] as ActivityChartDatum[]
@@ -1893,13 +1953,17 @@ function App() {
 
     return loadedRepoIds
   }, [analysisDataByRepo, loadedRepoIds, prChartMultiRepoIds, prChartScopeMode, prChartSingleRepoId])
+  const prChartRangeResolution = useMemo(
+    () => resolveChartDateRangeWithinCore(lastRunRange, prChartStartDay, prChartEndDay),
+    [lastRunRange, prChartEndDay, prChartStartDay],
+  )
   const prChartAggregation = useMemo(() => {
-    if (!lastRunRange || prChartRepoIds.length === 0) {
+    if (!prChartRangeResolution.ok || prChartRepoIds.length === 0) {
       return null
     }
 
-    return aggregateRepositoryActivity(analysisDataByRepo, prChartRepoIds, lastRunRange, prChartGranularity)
-  }, [analysisDataByRepo, lastRunRange, prChartGranularity, prChartRepoIds])
+    return aggregateRepositoryActivity(analysisDataByRepo, prChartRepoIds, prChartRangeResolution.range, prChartGranularity)
+  }, [analysisDataByRepo, prChartGranularity, prChartRangeResolution, prChartRepoIds])
   const prMergedChartData = useMemo(() => {
     if (!prChartAggregation) {
       return [] as ActivityChartDatum[]
@@ -1951,18 +2015,22 @@ function App() {
     issuesOpenedChartSingleRepoId,
     loadedRepoIds,
   ])
+  const issuesOpenedChartRangeResolution = useMemo(
+    () => resolveChartDateRangeWithinCore(lastRunRange, issuesOpenedChartStartDay, issuesOpenedChartEndDay),
+    [issuesOpenedChartEndDay, issuesOpenedChartStartDay, lastRunRange],
+  )
   const issuesOpenedChartAggregation = useMemo(() => {
-    if (!lastRunRange || issuesOpenedChartRepoIds.length === 0) {
+    if (!issuesOpenedChartRangeResolution.ok || issuesOpenedChartRepoIds.length === 0) {
       return null
     }
 
     return aggregateRepositoryActivity(
       analysisDataByRepo,
       issuesOpenedChartRepoIds,
-      lastRunRange,
+      issuesOpenedChartRangeResolution.range,
       issuesOpenedChartGranularity,
     )
-  }, [analysisDataByRepo, issuesOpenedChartGranularity, issuesOpenedChartRepoIds, lastRunRange])
+  }, [analysisDataByRepo, issuesOpenedChartGranularity, issuesOpenedChartRangeResolution, issuesOpenedChartRepoIds])
   const issuesOpenedChartData = useMemo(() => {
     if (!issuesOpenedChartAggregation) {
       return [] as ActivityChartDatum[]
@@ -2011,18 +2079,22 @@ function App() {
     issuesClosedChartSingleRepoId,
     loadedRepoIds,
   ])
+  const issuesClosedChartRangeResolution = useMemo(
+    () => resolveChartDateRangeWithinCore(lastRunRange, issuesClosedChartStartDay, issuesClosedChartEndDay),
+    [issuesClosedChartEndDay, issuesClosedChartStartDay, lastRunRange],
+  )
   const issuesClosedChartAggregation = useMemo(() => {
-    if (!lastRunRange || issuesClosedChartRepoIds.length === 0) {
+    if (!issuesClosedChartRangeResolution.ok || issuesClosedChartRepoIds.length === 0) {
       return null
     }
 
     return aggregateRepositoryActivity(
       analysisDataByRepo,
       issuesClosedChartRepoIds,
-      lastRunRange,
+      issuesClosedChartRangeResolution.range,
       issuesClosedChartGranularity,
     )
-  }, [analysisDataByRepo, issuesClosedChartGranularity, issuesClosedChartRepoIds, lastRunRange])
+  }, [analysisDataByRepo, issuesClosedChartGranularity, issuesClosedChartRangeResolution, issuesClosedChartRepoIds])
   const issuesClosedChartData = useMemo(() => {
     if (!issuesClosedChartAggregation) {
       return [] as ActivityChartDatum[]
@@ -2065,25 +2137,39 @@ function App() {
 
     return loadedRepoIds
   }, [analysisDataByRepo, cycleChartMultiRepoIds, cycleChartScopeMode, cycleChartSingleRepoId, loadedRepoIds])
+  const cycleChartRangeResolution = useMemo(
+    () => resolveChartDateRangeWithinCore(lastRunRange, cycleChartStartDay, cycleChartEndDay),
+    [cycleChartEndDay, cycleChartStartDay, lastRunRange],
+  )
   const cycleChartSingleRepoValue =
     cycleChartSingleRepoId.length > 0 && analysisDataByRepo[cycleChartSingleRepoId]
       ? cycleChartSingleRepoId
       : loadedRepoIds[0] ?? ''
   const cycleChartMultiRepoValue = cycleChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
   const cycleChartAggregation = useMemo(() => {
-    if (!lastRunRange || cycleChartRepoIds.length === 0) {
+    if (!cycleChartRangeResolution.ok || cycleChartRepoIds.length === 0) {
       return null
     }
 
-    return aggregateRepositoryActivity(analysisDataByRepo, cycleChartRepoIds, lastRunRange, cycleChartGranularity)
-  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRepoIds, lastRunRange])
+    return aggregateRepositoryActivity(
+      analysisDataByRepo,
+      cycleChartRepoIds,
+      cycleChartRangeResolution.range,
+      cycleChartGranularity,
+    )
+  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRangeResolution, cycleChartRepoIds])
   const cycleMergeTimeTrend = useMemo(() => {
-    if (!lastRunRange || cycleChartRepoIds.length === 0) {
+    if (!cycleChartRangeResolution.ok || cycleChartRepoIds.length === 0) {
       return [] as MergeTimeTrendPoint[]
     }
 
-    return aggregateMergeTimeTrend(analysisDataByRepo, cycleChartRepoIds, lastRunRange, cycleChartGranularity)
-  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRepoIds, lastRunRange])
+    return aggregateMergeTimeTrend(
+      analysisDataByRepo,
+      cycleChartRepoIds,
+      cycleChartRangeResolution.range,
+      cycleChartGranularity,
+    )
+  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRangeResolution, cycleChartRepoIds])
   const cycleRollingWindowSize = Number(cycleRollingWindow)
   const cycleMergeTimeTrendData = useMemo(
     () => buildMergeTimeTrendChartData(cycleMergeTimeTrend, cycleRollingWindowSize),
@@ -2408,6 +2494,16 @@ function App() {
     setRunFinishedAt(null)
     setLastRunRange(runRange)
     setLastRunRangeLabel(runRange.label)
+    setCommitsChartStartDay(runRange.startDay)
+    setCommitsChartEndDay(runRange.endDay)
+    setPrChartStartDay(runRange.startDay)
+    setPrChartEndDay(runRange.endDay)
+    setIssuesOpenedChartStartDay(runRange.startDay)
+    setIssuesOpenedChartEndDay(runRange.endDay)
+    setIssuesClosedChartStartDay(runRange.startDay)
+    setIssuesClosedChartEndDay(runRange.endDay)
+    setCycleChartStartDay(runRange.startDay)
+    setCycleChartEndDay(runRange.endDay)
     setStepStatuses(createStepStatusMap('queued'))
     setAnalysisDataByRepo({})
     setRepoMatrixRows(
@@ -2693,28 +2789,38 @@ function App() {
                   setCommitsChartScopeMode('all')
                   setCommitsChartStyle('line')
                   setCommitsChartBreakdownMode('aggregate')
+                  setCommitsChartStartDay('')
+                  setCommitsChartEndDay('')
                   setCommitsChartSingleRepoId('')
                   setCommitsChartMultiRepoIds([])
                   setPrChartGranularity('weekly')
                   setPrChartScopeMode('all')
                   setPrChartStyle('line')
                   setPrChartBreakdownMode('aggregate')
+                  setPrChartStartDay('')
+                  setPrChartEndDay('')
                   setPrChartSingleRepoId('')
                   setPrChartMultiRepoIds([])
                   setIssuesOpenedChartGranularity('weekly')
                   setIssuesOpenedChartScopeMode('all')
                   setIssuesOpenedChartStyle('line')
                   setIssuesOpenedChartBreakdownMode('aggregate')
+                  setIssuesOpenedChartStartDay('')
+                  setIssuesOpenedChartEndDay('')
                   setIssuesOpenedChartSingleRepoId('')
                   setIssuesOpenedChartMultiRepoIds([])
                   setIssuesClosedChartGranularity('weekly')
                   setIssuesClosedChartScopeMode('all')
                   setIssuesClosedChartStyle('line')
                   setIssuesClosedChartBreakdownMode('aggregate')
+                  setIssuesClosedChartStartDay('')
+                  setIssuesClosedChartEndDay('')
                   setIssuesClosedChartSingleRepoId('')
                   setIssuesClosedChartMultiRepoIds([])
                   setCycleChartGranularity('weekly')
                   setCycleChartScopeMode('all')
+                  setCycleChartStartDay('')
+                  setCycleChartEndDay('')
                   setCycleChartSingleRepoId('')
                   setCycleChartMultiRepoIds([])
                   setCycleRollingWindow('4')
@@ -2904,7 +3010,6 @@ function App() {
 
         <div className="run-meta">
           <p>Progress: {progressPercent}% ({completedStepCount}/{RUN_STEPS.length} steps)</p>
-          <p>Active Step: {activeStep ? RUN_STEPS.find((step) => step.key === activeStep)?.label : 'None'}</p>
           <p>Selected Repos: {selectedRepos.length}</p>
           <p>Loaded Data Repos: {loadedRepoCount}</p>
           <p>Range: {lastRunRangeLabel}</p>
@@ -2921,100 +3026,6 @@ function App() {
           ) : (
             <p>Rate limit details will appear after GitHub requests start.</p>
           )}
-        </div>
-
-        <div className="aggregation-preview-panel">
-          <div className="aggregation-preview-header">
-            <h3>Aggregation Preview</h3>
-            <div className="aggregation-controls">
-              <label>
-                Granularity
-                <select
-                  value={aggregationGranularity}
-                  onChange={(event) => setAggregationGranularity(event.target.value as AggregationGranularity)}
-                  disabled={loadedRepoCount === 0}
-                >
-                  <option value="daily">Daily</option>
-                  <option value="weekly">Weekly</option>
-                  <option value="monthly">Monthly</option>
-                </select>
-              </label>
-              <label>
-                Repo Scope
-                <select
-                  value={aggregationScope}
-                  onChange={(event) => setAggregationScope(event.target.value as AggregationScope)}
-                  disabled={loadedRepoCount === 0}
-                >
-                  <option value="selected">Selected repos</option>
-                  <option value="loaded">All loaded repos</option>
-                </select>
-              </label>
-            </div>
-          </div>
-          {aggregatedActivity ? (
-            <>
-              <div className="aggregation-summary-grid">
-                <p>Scope repos: {aggregatedActivity.repoIds.length}</p>
-                <p>Commits: {aggregatedActivity.totals.commits}</p>
-                <p>PRs opened: {aggregatedActivity.totals.prsOpened}</p>
-                <p>PRs merged: {aggregatedActivity.totals.prsMerged}</p>
-                <p>Issues opened: {aggregatedActivity.totals.issuesOpened}</p>
-                <p>Issues closed: {aggregatedActivity.totals.issuesClosed}</p>
-                <p>
-                  Merge time avg/median:{' '}
-                  {aggregatedActivity.mergeTime.averageHours === null
-                    ? '-'
-                    : `${aggregatedActivity.mergeTime.averageHours.toFixed(1)}h`}
-                  {' / '}
-                  {aggregatedActivity.mergeTime.medianHours === null
-                    ? '-'
-                    : `${aggregatedActivity.mergeTime.medianHours.toFixed(1)}h`}
-                </p>
-              </div>
-              <div className="aggregation-bucket-preview">
-                <h4>Recent Buckets (Commits / PRs Opened / PRs Merged / Issues Opened / Issues Closed)</h4>
-                {aggregatedActivity.series.commits.length === 0 ? (
-                  <p>No buckets in selected range.</p>
-                ) : (
-                  <ul>
-                    {aggregatedActivity.series.commits.slice(-5).map((commitPoint) => {
-                      const prOpenedPoint = aggregatedActivity.series.prsOpened.find(
-                        (seriesPoint) => seriesPoint.bucketStart === commitPoint.bucketStart,
-                      )
-                      const prPoint = aggregatedActivity.series.prsMerged.find(
-                        (seriesPoint) => seriesPoint.bucketStart === commitPoint.bucketStart,
-                      )
-                      const openedPoint = aggregatedActivity.series.issuesOpened.find(
-                        (seriesPoint) => seriesPoint.bucketStart === commitPoint.bucketStart,
-                      )
-                      const closedPoint = aggregatedActivity.series.issuesClosed.find(
-                        (seriesPoint) => seriesPoint.bucketStart === commitPoint.bucketStart,
-                      )
-
-                      return (
-                        <li key={commitPoint.bucketStart}>
-                          {commitPoint.bucketLabel}: {commitPoint.total} / {prOpenedPoint?.total ?? 0} /{' '}
-                          {prPoint?.total ?? 0} / {openedPoint?.total ?? 0} / {closedPoint?.total ?? 0}
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-              </div>
-            </>
-          ) : (
-            <p className="aggregation-empty">Run analysis successfully to generate aggregated series.</p>
-          )}
-        </div>
-
-        <div className="step-progress-panel">
-          {RUN_STEPS.map((step) => (
-            <div className="step-progress-row" key={step.key}>
-              <span>{step.label}</span>
-              <span className={`status-chip status-chip--${stepStatuses[step.key]}`}>{stepStatuses[step.key]}</span>
-            </div>
-          ))}
         </div>
 
         <div className="matrix-panel">
@@ -3101,6 +3112,28 @@ function App() {
                 </select>
               </label>
               <label>
+                Start
+                <input
+                  type="date"
+                  value={commitsChartStartDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setCommitsChartStartDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
+              </label>
+              <label>
+                End
+                <input
+                  type="date"
+                  value={commitsChartEndDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setCommitsChartEndDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
+              </label>
+              <label>
                 Chart Style
                 <select
                   value={commitsChartStyle}
@@ -3162,7 +3195,9 @@ function App() {
               )}
             </div>
           </div>
-          {commitsChartAggregation ? (
+          {!commitsChartRangeResolution.ok ? (
+            <div className="chart-placeholder">{commitsChartRangeResolution.message}</div>
+          ) : commitsChartAggregation ? (
             <>
               <div className="stats-grid">
                 <div className="stat-card">
@@ -3188,7 +3223,7 @@ function App() {
               />
             </>
           ) : (
-            <div className="chart-placeholder">Run analysis to generate commit charts.</div>
+            <div className="chart-placeholder">No commit data for the selected chart range.</div>
           )}
         </section>
 
@@ -3221,6 +3256,28 @@ function App() {
                 </select>
               </label>
               <label>
+                Start
+                <input
+                  type="date"
+                  value={prChartStartDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setPrChartStartDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
+              </label>
+              <label>
+                End
+                <input
+                  type="date"
+                  value={prChartEndDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setPrChartEndDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
+              </label>
+              <label>
                 Chart Style
                 <select
                   value={prChartStyle}
@@ -3282,7 +3339,9 @@ function App() {
               )}
             </div>
           </div>
-          {prChartAggregation ? (
+          {!prChartRangeResolution.ok ? (
+            <div className="chart-placeholder">{prChartRangeResolution.message}</div>
+          ) : prChartAggregation ? (
             <>
               <div className="stats-grid">
                 <div className="stat-card">
@@ -3308,7 +3367,7 @@ function App() {
               />
             </>
           ) : (
-            <div className="chart-placeholder">Run analysis to generate opened PR charts.</div>
+            <div className="chart-placeholder">No opened PR data for the selected chart range.</div>
           )}
         </section>
 
@@ -3341,6 +3400,28 @@ function App() {
                 </select>
               </label>
               <label>
+                Start
+                <input
+                  type="date"
+                  value={prChartStartDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setPrChartStartDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
+              </label>
+              <label>
+                End
+                <input
+                  type="date"
+                  value={prChartEndDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setPrChartEndDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
+              </label>
+              <label>
                 Chart Style
                 <select
                   value={prChartStyle}
@@ -3402,7 +3483,9 @@ function App() {
               )}
             </div>
           </div>
-          {prChartAggregation ? (
+          {!prChartRangeResolution.ok ? (
+            <div className="chart-placeholder">{prChartRangeResolution.message}</div>
+          ) : prChartAggregation ? (
             <>
               <div className="stats-grid">
                 <div className="stat-card">
@@ -3436,7 +3519,7 @@ function App() {
               />
             </>
           ) : (
-            <div className="chart-placeholder">Run analysis to generate merged PR charts.</div>
+            <div className="chart-placeholder">No merged PR data for the selected chart range.</div>
           )}
         </section>
 
@@ -3467,6 +3550,28 @@ function App() {
                   <option value="multi">Multi-select repos</option>
                   <option value="single">Single repo</option>
                 </select>
+              </label>
+              <label>
+                Start
+                <input
+                  type="date"
+                  value={issuesOpenedChartStartDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setIssuesOpenedChartStartDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
+              </label>
+              <label>
+                End
+                <input
+                  type="date"
+                  value={issuesOpenedChartEndDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setIssuesOpenedChartEndDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
               </label>
               <label>
                 Chart Style
@@ -3530,7 +3635,9 @@ function App() {
               )}
             </div>
           </div>
-          {issuesOpenedChartAggregation ? (
+          {!issuesOpenedChartRangeResolution.ok ? (
+            <div className="chart-placeholder">{issuesOpenedChartRangeResolution.message}</div>
+          ) : issuesOpenedChartAggregation ? (
             <>
               <div className="stats-grid">
                 <div className="stat-card">
@@ -3556,7 +3663,7 @@ function App() {
               />
             </>
           ) : (
-            <div className="chart-placeholder">Run analysis to generate opened issue charts.</div>
+            <div className="chart-placeholder">No opened issue data for the selected chart range.</div>
           )}
         </section>
 
@@ -3587,6 +3694,28 @@ function App() {
                   <option value="multi">Multi-select repos</option>
                   <option value="single">Single repo</option>
                 </select>
+              </label>
+              <label>
+                Start
+                <input
+                  type="date"
+                  value={issuesClosedChartStartDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setIssuesClosedChartStartDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
+              </label>
+              <label>
+                End
+                <input
+                  type="date"
+                  value={issuesClosedChartEndDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setIssuesClosedChartEndDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
               </label>
               <label>
                 Chart Style
@@ -3650,7 +3779,9 @@ function App() {
               )}
             </div>
           </div>
-          {issuesClosedChartAggregation ? (
+          {!issuesClosedChartRangeResolution.ok ? (
+            <div className="chart-placeholder">{issuesClosedChartRangeResolution.message}</div>
+          ) : issuesClosedChartAggregation ? (
             <>
               <div className="stats-grid">
                 <div className="stat-card">
@@ -3676,7 +3807,7 @@ function App() {
               />
             </>
           ) : (
-            <div className="chart-placeholder">Run analysis to generate closed issue charts.</div>
+            <div className="chart-placeholder">No closed issue data for the selected chart range.</div>
           )}
         </section>
 
@@ -3707,6 +3838,28 @@ function App() {
                   <option value="multi">Multi-select repos</option>
                   <option value="single">Single repo</option>
                 </select>
+              </label>
+              <label>
+                Start
+                <input
+                  type="date"
+                  value={cycleChartStartDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setCycleChartStartDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
+              </label>
+              <label>
+                End
+                <input
+                  type="date"
+                  value={cycleChartEndDay}
+                  min={lastRunRange?.startDay}
+                  max={lastRunRange?.endDay}
+                  onChange={(event) => setCycleChartEndDay(event.target.value)}
+                  disabled={loadedRepoCount === 0 || !lastRunRange}
+                />
               </label>
               <label>
                 Smoothing
@@ -3759,7 +3912,9 @@ function App() {
               )}
             </div>
           </div>
-          {cycleChartAggregation ? (
+          {!cycleChartRangeResolution.ok ? (
+            <div className="chart-placeholder">{cycleChartRangeResolution.message}</div>
+          ) : cycleChartAggregation ? (
             <>
               <div className="stats-grid">
                 <div className="stat-card">
@@ -3830,7 +3985,7 @@ function App() {
               </div>
             </>
           ) : (
-            <div className="chart-placeholder">Run analysis to generate cycle-time charts.</div>
+            <div className="chart-placeholder">No cycle-time data for the selected chart range.</div>
           )}
         </section>
       </main>
