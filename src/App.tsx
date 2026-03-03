@@ -18,6 +18,7 @@ import { GITHUB_GRAPHQL_ENDPOINT, GITHUB_REST_ENDPOINT } from './config/env'
 import './App.css'
 
 const TOKEN_STORAGE_KEY = 'gitTelemetry.githubToken'
+const THEME_STORAGE_KEY = 'gitTelemetry.themeMode'
 const VIEWER_QUERY = `
   query ViewerValidation {
     viewer {
@@ -51,6 +52,13 @@ const CHART_COLORS = [
   '#9c755f',
   '#bab0ab',
 ]
+const CHART_GRID_COLOR = 'var(--chart-grid)'
+const CHART_AXIS_COLOR = 'var(--chart-axis)'
+const CHART_TOOLTIP_BORDER = 'var(--chart-tooltip-border)'
+const CHART_TOOLTIP_LABEL = 'var(--chart-tooltip-label)'
+const CHART_AGGREGATE_COLOR = 'var(--chart-aggregate)'
+const CHART_TURNAROUND_BUCKET_COLOR = 'var(--chart-turnaround-bucket)'
+const CHART_TURNAROUND_ROLLING_COLOR = 'var(--chart-turnaround-rolling)'
 const NO_REPO_SELECTION = '__none__'
 const ALL_REPOS_OPTION = '__all__'
 const UNKNOWN_USER_ID = '__unknown_user__'
@@ -151,6 +159,7 @@ const REPOSITORY_COMMITS_QUERY = `
 type TokenValidationState = 'idle' | 'validating' | 'valid' | 'invalid' | 'error'
 type RepositoryDiscoveryState = 'idle' | 'loading' | 'success' | 'error'
 type RunPhase = 'idle' | 'running' | 'done' | 'partial' | 'error' | 'cancelled'
+type ThemeMode = 'light' | 'dark'
 type ProgressStatus = 'queued' | 'fetching' | 'done' | 'error'
 type RunStepKey = (typeof RUN_STEPS)[number]['key']
 type RepoDataKey = (typeof REPO_DATA_COLUMNS)[number]['key']
@@ -1365,16 +1374,16 @@ function ActivityLineChart({
       <ResponsiveContainer width="100%" height={480}>
         {chartStyle === 'bar' ? (
           <BarChart data={chartData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
-            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
-            <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_COLOR} />
+            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: CHART_AXIS_COLOR, fontSize: 12 }} />
+            <YAxis allowDecimals={false} tick={{ fill: CHART_AXIS_COLOR, fontSize: 12 }} />
             <Tooltip
-              contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
-              labelStyle={{ color: '#16210e', fontWeight: 700 }}
+              contentStyle={{ borderRadius: 8, border: `1px solid ${CHART_TOOLTIP_BORDER}` }}
+              labelStyle={{ color: CHART_TOOLTIP_LABEL, fontWeight: 700 }}
             />
             <Legend />
             {showAggregate ? (
-              <Bar dataKey="total" name={resolvedAggregateLabel} fill="#1f7a3a" />
+              <Bar dataKey="total" name={resolvedAggregateLabel} fill={CHART_AGGREGATE_COLOR} />
             ) : (
               lines.map((lineConfig) => (
                 <Bar
@@ -1389,12 +1398,12 @@ function ActivityLineChart({
           </BarChart>
         ) : chartStyle === 'cumulative' ? (
           <AreaChart data={chartData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
-            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
-            <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_COLOR} />
+            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: CHART_AXIS_COLOR, fontSize: 12 }} />
+            <YAxis allowDecimals={false} tick={{ fill: CHART_AXIS_COLOR, fontSize: 12 }} />
             <Tooltip
-              contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
-              labelStyle={{ color: '#16210e', fontWeight: 700 }}
+              contentStyle={{ borderRadius: 8, border: `1px solid ${CHART_TOOLTIP_BORDER}` }}
+              labelStyle={{ color: CHART_TOOLTIP_LABEL, fontWeight: 700 }}
             />
             <Legend />
             {showAggregate ? (
@@ -1402,8 +1411,8 @@ function ActivityLineChart({
                 type="monotone"
                 dataKey="total"
                 name={resolvedAggregateLabel}
-                stroke="#1f7a3a"
-                fill="#1f7a3a"
+                stroke={CHART_AGGREGATE_COLOR}
+                fill={CHART_AGGREGATE_COLOR}
                 fillOpacity={0.32}
                 strokeWidth={2}
               />
@@ -1425,12 +1434,12 @@ function ActivityLineChart({
           </AreaChart>
         ) : (
           <LineChart data={chartData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
-            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
-            <YAxis allowDecimals={false} tick={{ fill: '#47603a', fontSize: 12 }} />
+            <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_COLOR} />
+            <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: CHART_AXIS_COLOR, fontSize: 12 }} />
+            <YAxis allowDecimals={false} tick={{ fill: CHART_AXIS_COLOR, fontSize: 12 }} />
             <Tooltip
-              contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
-              labelStyle={{ color: '#16210e', fontWeight: 700 }}
+              contentStyle={{ borderRadius: 8, border: `1px solid ${CHART_TOOLTIP_BORDER}` }}
+              labelStyle={{ color: CHART_TOOLTIP_LABEL, fontWeight: 700 }}
             />
             <Legend />
             {showAggregate ? (
@@ -1438,7 +1447,7 @@ function ActivityLineChart({
                 type="monotone"
                 dataKey="total"
                 name={resolvedAggregateLabel}
-                stroke="#1f7a3a"
+                stroke={CHART_AGGREGATE_COLOR}
                 strokeWidth={2}
                 dot={false}
                 activeDot={{ r: 5 }}
@@ -1619,6 +1628,27 @@ function readTokenFromStorage(): string {
   }
 }
 
+function readThemeFromStorage(): ThemeMode {
+  if (typeof window === 'undefined') {
+    return 'light'
+  }
+
+  try {
+    const storedTheme = localStorage.getItem(THEME_STORAGE_KEY)
+    if (storedTheme === 'light' || storedTheme === 'dark') {
+      return storedTheme
+    }
+  } catch {
+    // Ignore storage read failures and use system/default fallback.
+  }
+
+  if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    return 'dark'
+  }
+
+  return 'light'
+}
+
 function extractGraphQLErrorMessage<TData>(payload: GitHubGraphQLResponse<TData> | null): string {
   if (!payload?.errors || payload.errors.length === 0) {
     return ''
@@ -1650,6 +1680,7 @@ async function executeGitHubGraphQL<TData>(
 }
 
 function App() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeFromStorage())
   const [token, setToken] = useState<string>(() => readTokenFromStorage())
   const [persistToken, setPersistToken] = useState<boolean>(() => readTokenFromStorage().length > 0)
   const [isTokenHelpOpen, setIsTokenHelpOpen] = useState(false)
@@ -1738,6 +1769,23 @@ function App() {
   const [analysisDataByRepo, setAnalysisDataByRepo] = useState<Record<string, RepoAnalysisData>>({})
   const runSequenceRef = useRef(0)
   const activeRunRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute('data-theme', themeMode)
+      document.documentElement.style.colorScheme = themeMode
+    }
+
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, themeMode)
+    } catch {
+      // Ignore storage write failures; theme remains active in memory.
+    }
+  }, [themeMode])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -3417,12 +3465,21 @@ function App() {
     <div className="app-shell">
       <header className="setup-layout">
         <div className="panel brand-panel">
-          <div className="brand">
-            <img src="/logo.png" alt="Git Activity Analyzer logo" className="brand-logo" />
-            <div>
-              <h1>Git Activity Analyzer</h1>
-              <p>Analyze multi-repo GitHub activity in one run.</p>
+          <div className="brand-panel-header">
+            <div className="brand">
+              <img src="/logo.png" alt="Git Activity Analyzer logo" className="brand-logo" />
+              <div>
+                <h1>Git Activity Analyzer</h1>
+                <p>Analyze multi-repo GitHub activity in one run.</p>
+              </div>
             </div>
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => setThemeMode((previous) => (previous === 'light' ? 'dark' : 'light'))}
+            >
+              {themeMode === 'light' ? 'Dark Mode' : 'Light Mode'}
+            </button>
           </div>
         </div>
 
@@ -4583,19 +4640,19 @@ function App() {
                   <div className="commits-chart-canvas">
                     <ResponsiveContainer width="100%" height={450}>
                       <LineChart data={cycleMergeTimeTrendData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
-                        <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
-                        <YAxis tick={{ fill: '#47603a', fontSize: 12 }} />
+                        <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_COLOR} />
+                        <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: CHART_AXIS_COLOR, fontSize: 12 }} />
+                        <YAxis tick={{ fill: CHART_AXIS_COLOR, fontSize: 12 }} />
                         <Tooltip
-                          contentStyle={{ borderRadius: 8, border: '1px solid #d8e2ce' }}
-                          labelStyle={{ color: '#16210e', fontWeight: 700 }}
+                          contentStyle={{ borderRadius: 8, border: `1px solid ${CHART_TOOLTIP_BORDER}` }}
+                          labelStyle={{ color: CHART_TOOLTIP_LABEL, fontWeight: 700 }}
                         />
                         <Legend />
                         <Line
                           type="monotone"
                           dataKey="averageDays"
                           name="Bucket average (days)"
-                          stroke="#1f5d8b"
+                          stroke={CHART_TURNAROUND_BUCKET_COLOR}
                           strokeWidth={1.5}
                           dot={false}
                           activeDot={{ r: 4 }}
@@ -4605,7 +4662,7 @@ function App() {
                           type="monotone"
                           dataKey="rollingAverageDays"
                           name={`Rolling avg (${cycleRollingWindowSize} buckets, days)`}
-                          stroke="#8b651b"
+                          stroke={CHART_TURNAROUND_ROLLING_COLOR}
                           strokeWidth={2.5}
                           dot={false}
                           activeDot={{ r: 4 }}

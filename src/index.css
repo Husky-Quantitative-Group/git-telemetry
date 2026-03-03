@@ -8,6 +8,7 @@
   -moz-osx-font-smoothing: grayscale;
   --page-bg-top: #f4f6ef;
   --page-bg-bottom: #e7ede2;
+  --page-glow: #d7e8c8;
   --panel-surface: #fcfdf8;
   --panel-surface-muted: #f3f7ec;
   --panel-border: #d8e2ce;
@@ -15,6 +16,41 @@
   --text-primary: #16210e;
   --text-secondary: #47603a;
   --action: #1f7a3a;
+  --surface-plain: #ffffff;
+  --surface-overlay: rgb(255 255 255 / 80%);
+  --surface-soft: rgb(243 247 236 / 90%);
+  --modal-backdrop: rgb(10 18 8 / 52%);
+  --chart-grid: #d8e2ce;
+  --chart-axis: #47603a;
+  --chart-tooltip-border: #d8e2ce;
+  --chart-tooltip-label: #16210e;
+  --chart-aggregate: #1f7a3a;
+  --chart-turnaround-bucket: #1f5d8b;
+  --chart-turnaround-rolling: #8b651b;
+}
+
+:root[data-theme='dark'] {
+  --page-bg-top: #0f1712;
+  --page-bg-bottom: #0c1410;
+  --page-glow: #2a3b2d;
+  --panel-surface: #142018;
+  --panel-surface-muted: #101a14;
+  --panel-border: #314336;
+  --control-border: #415645;
+  --text-primary: #e6f2e7;
+  --text-secondary: #aac1ad;
+  --action: #57b772;
+  --surface-plain: #18251d;
+  --surface-overlay: rgb(24 37 29 / 85%);
+  --surface-soft: rgb(26 39 30 / 95%);
+  --modal-backdrop: rgb(2 7 4 / 70%);
+  --chart-grid: #405245;
+  --chart-axis: #c6d9c8;
+  --chart-tooltip-border: #4f6554;
+  --chart-tooltip-label: #f1fbf2;
+  --chart-aggregate: #57b772;
+  --chart-turnaround-bucket: #72b6e3;
+  --chart-turnaround-rolling: #f0c56e;
 }
 
 *,
@@ -29,6 +65,6 @@ body {
   min-height: 100vh;
   color: var(--text-primary);
   background:
-    radial-gradient(circle at top right, #d7e8c8 0%, transparent 45%),
+    radial-gradient(circle at top right, var(--page-glow) 0%, transparent 45%),
     linear-gradient(180deg, var(--page-bg-top), var(--page-bg-bottom));
 }
