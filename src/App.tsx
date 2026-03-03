@@ -53,6 +53,7 @@ const CHART_COLORS = [
 ]
 const NO_REPO_SELECTION = '__none__'
 const ALL_REPOS_OPTION = '__all__'
+const UNKNOWN_USER_ID = '__unknown_user__'
 const REPOSITORY_DEFAULT_BRANCH_QUERY = `
   query RepositoryDefaultBranch($owner: String!, $name: String!) {
     repository(owner: $owner, name: $name) {
@@ -181,7 +182,17 @@ type LoadedRepoOption = {
   repoName: string
 }
 
-type RepoSelectOption = {
+type LoadedUserOption = {
+  userId: string
+  userLabel: string
+}
+
+type SelectFilterOption = {
+  id: string
+  label: string
+}
+
+type MultiSelectOption = {
   value: string
   label: string
   isAll?: boolean
@@ -304,7 +315,7 @@ type RepoRawAnalysisData = {
 
 type AggregationGranularity = 'daily' | 'weekly' | 'monthly'
 type CommitsChartScopeMode = 'all' | 'multi' | 'single'
-type ChartBreakdownMode = 'aggregate' | 'byRepo'
+type ChartBreakdownMode = 'aggregate' | 'byRepo' | 'byUser'
 type ChartStyle = 'line' | 'bar' | 'cumulative'
 
 type AggregatedBucketPoint = {
@@ -312,6 +323,7 @@ type AggregatedBucketPoint = {
   bucketLabel: string
   total: number
   byRepo: Record<string, number>
+  byUser: Record<string, number>
 }
 
 type AggregatedRepoTotals = {
@@ -582,6 +594,31 @@ function getRepositoryShortName(nameWithOwner: string): string {
   }
 
   return nameWithOwner.slice(separatorIndex + 1)
+}
+
+function normalizeUserId(candidate?: string): string | null {
+  if (!candidate) {
+    return null
+  }
+
+  const normalized = candidate.trim()
+  return normalized.length > 0 ? normalized : null
+}
+
+function getPullRequestUserId(pullRequest: PullRequestRecord): string {
+  return normalizeUserId(pullRequest.authorLogin) ?? UNKNOWN_USER_ID
+}
+
+function getIssueUserId(issue: IssueRecord): string {
+  return normalizeUserId(issue.authorLogin) ?? UNKNOWN_USER_ID
+}
+
+function getCommitUserId(commit: CommitRecord): string {
+  return normalizeUserId(commit.authorLogin) ?? normalizeUserId(commit.authorName) ?? UNKNOWN_USER_ID
+}
+
+function getUserDisplayLabel(userId: string): string {
+  return userId === UNKNOWN_USER_ID ? 'Unknown' : userId
 }
 
 function parseRateLimitSnapshot(response: Response): RateLimitSnapshot | null {
@@ -870,6 +907,7 @@ function aggregateRepositoryActivity(
   repoIds: string[],
   range: RunDateRange,
   granularity: AggregationGranularity,
+  selectedUserIds: string[],
 ): AggregatedActivity {
   const bucketTimeline = createBucketTimeline(range, granularity)
   const bucketPointMap = {
@@ -886,16 +924,18 @@ function aggregateRepositoryActivity(
       bucketLabel: formatBucketLabel(bucketStart, granularity),
       total: 0,
       byRepo: {} as Record<string, number>,
+      byUser: {} as Record<string, number>,
     }
-    bucketPointMap.commits.set(bucketStart, { ...pointBase, byRepo: {} })
-    bucketPointMap.prsOpened.set(bucketStart, { ...pointBase, byRepo: {} })
-    bucketPointMap.prsMerged.set(bucketStart, { ...pointBase, byRepo: {} })
-    bucketPointMap.issuesOpened.set(bucketStart, { ...pointBase, byRepo: {} })
-    bucketPointMap.issuesClosed.set(bucketStart, { ...pointBase, byRepo: {} })
+    bucketPointMap.commits.set(bucketStart, { ...pointBase, byRepo: {}, byUser: {} })
+    bucketPointMap.prsOpened.set(bucketStart, { ...pointBase, byRepo: {}, byUser: {} })
+    bucketPointMap.prsMerged.set(bucketStart, { ...pointBase, byRepo: {}, byUser: {} })
+    bucketPointMap.issuesOpened.set(bucketStart, { ...pointBase, byRepo: {}, byUser: {} })
+    bucketPointMap.issuesClosed.set(bucketStart, { ...pointBase, byRepo: {}, byUser: {} })
   }
 
   const rangeStartTime = new Date(range.startIso).valueOf()
   const rangeEndTime = new Date(range.endIso).valueOf()
+  const selectedUserIdSet = new Set(selectedUserIds)
   const globalMergeDurations: number[] = []
   const perRepoTotals: AggregatedRepoTotals[] = []
 
@@ -903,6 +943,7 @@ function aggregateRepositoryActivity(
     bucketMap: Map<string, AggregatedBucketPoint>,
     bucketIso: string,
     repoId: string,
+    userId: string,
     incrementBy: number,
   ) {
     const bucketPoint = bucketMap.get(bucketIso)
@@ -912,6 +953,7 @@ function aggregateRepositoryActivity(
 
     bucketPoint.total += incrementBy
     bucketPoint.byRepo[repoId] = (bucketPoint.byRepo[repoId] ?? 0) + incrementBy
+    bucketPoint.byUser[userId] = (bucketPoint.byUser[userId] ?? 0) + incrementBy
   }
 
   for (const repoId of repoIds) {
@@ -928,6 +970,11 @@ function aggregateRepositoryActivity(
     const repoMergeDurations: number[] = []
 
     for (const commit of repoData.commits) {
+      const commitUserId = getCommitUserId(commit)
+      if (!selectedUserIdSet.has(commitUserId)) {
+        continue
+      }
+
       const commitTime = new Date(commit.authoredDate).valueOf()
       if (Number.isNaN(commitTime) || commitTime < rangeStartTime || commitTime > rangeEndTime) {
         continue
@@ -938,11 +985,16 @@ function aggregateRepositoryActivity(
         continue
       }
 
-      addToBucket(bucketPointMap.commits, bucketStartDate.toISOString(), repoId, 1)
+      addToBucket(bucketPointMap.commits, bucketStartDate.toISOString(), repoId, commitUserId, 1)
       repoCommits += 1
     }
 
     for (const pullRequest of repoData.pullRequestsOpened) {
+      const pullRequestUserId = getPullRequestUserId(pullRequest)
+      if (!selectedUserIdSet.has(pullRequestUserId)) {
+        continue
+      }
+
       const openedTime = new Date(pullRequest.createdAt).valueOf()
       if (Number.isNaN(openedTime) || openedTime < rangeStartTime || openedTime > rangeEndTime) {
         continue
@@ -953,7 +1005,7 @@ function aggregateRepositoryActivity(
         continue
       }
 
-      addToBucket(bucketPointMap.prsOpened, bucketStartDate.toISOString(), repoId, 1)
+      addToBucket(bucketPointMap.prsOpened, bucketStartDate.toISOString(), repoId, pullRequestUserId, 1)
       repoPrsOpened += 1
     }
 
@@ -962,21 +1014,28 @@ function aggregateRepositoryActivity(
         continue
       }
 
+      const pullRequestUserId = getPullRequestUserId(pullRequest)
+      if (!selectedUserIdSet.has(pullRequestUserId)) {
+        continue
+      }
+
       const mergedTime = new Date(pullRequest.mergedAt).valueOf()
-      if (Number.isNaN(mergedTime) || mergedTime < rangeStartTime || mergedTime > rangeEndTime) {
-        continue
-      }
-
-      const bucketStartDate = getBucketStartDate(pullRequest.mergedAt, granularity)
-      if (!bucketStartDate) {
-        continue
-      }
-
-      addToBucket(bucketPointMap.prsMerged, bucketStartDate.toISOString(), repoId, 1)
-      repoPrsMerged += 1
-
       const createdTime = new Date(pullRequest.createdAt).valueOf()
-      if (!Number.isNaN(createdTime) && mergedTime > createdTime) {
+      if (Number.isNaN(mergedTime) || Number.isNaN(createdTime) || mergedTime <= createdTime) {
+        continue
+      }
+
+      if (mergedTime >= rangeStartTime && mergedTime <= rangeEndTime) {
+        const bucketStartDate = getBucketStartDate(pullRequest.mergedAt, granularity)
+        if (!bucketStartDate) {
+          continue
+        }
+
+        addToBucket(bucketPointMap.prsMerged, bucketStartDate.toISOString(), repoId, pullRequestUserId, 1)
+        repoPrsMerged += 1
+      }
+
+      if (createdTime >= rangeStartTime && createdTime <= rangeEndTime) {
         const durationDays = (mergedTime - createdTime) / (1000 * 60 * 60 * 24)
         repoMergeDurations.push(durationDays)
         globalMergeDurations.push(durationDays)
@@ -984,6 +1043,11 @@ function aggregateRepositoryActivity(
     }
 
     for (const openedIssue of repoData.issuesOpened) {
+      const issueUserId = getIssueUserId(openedIssue)
+      if (!selectedUserIdSet.has(issueUserId)) {
+        continue
+      }
+
       const openedTime = new Date(openedIssue.createdAt).valueOf()
       if (Number.isNaN(openedTime) || openedTime < rangeStartTime || openedTime > rangeEndTime) {
         continue
@@ -994,12 +1058,17 @@ function aggregateRepositoryActivity(
         continue
       }
 
-      addToBucket(bucketPointMap.issuesOpened, bucketStartDate.toISOString(), repoId, 1)
+      addToBucket(bucketPointMap.issuesOpened, bucketStartDate.toISOString(), repoId, issueUserId, 1)
       repoIssuesOpened += 1
     }
 
     for (const closedIssue of repoData.issuesClosed) {
       if (!closedIssue.closedAt) {
+        continue
+      }
+
+      const issueUserId = getIssueUserId(closedIssue)
+      if (!selectedUserIdSet.has(issueUserId)) {
         continue
       }
 
@@ -1013,7 +1082,7 @@ function aggregateRepositoryActivity(
         continue
       }
 
-      addToBucket(bucketPointMap.issuesClosed, bucketStartDate.toISOString(), repoId, 1)
+      addToBucket(bucketPointMap.issuesClosed, bucketStartDate.toISOString(), repoId, issueUserId, 1)
       repoIssuesClosed += 1
     }
 
@@ -1081,6 +1150,7 @@ function aggregateMergeTimeTrend(
   repoIds: string[],
   range: RunDateRange,
   granularity: AggregationGranularity,
+  selectedUserIds: string[],
 ): MergeTimeTrendPoint[] {
   const bucketTimeline = createBucketTimeline(range, granularity)
   const durationBuckets = new Map<string, number[]>()
@@ -1091,6 +1161,7 @@ function aggregateMergeTimeTrend(
 
   const rangeStartTime = new Date(range.startIso).valueOf()
   const rangeEndTime = new Date(range.endIso).valueOf()
+  const selectedUserIdSet = new Set(selectedUserIds)
 
   for (const repoId of repoIds) {
     const repoData = analysisByRepo[repoId]
@@ -1100,6 +1171,11 @@ function aggregateMergeTimeTrend(
 
     for (const pullRequest of repoData.pullRequests) {
       if (!pullRequest.mergedAt) {
+        continue
+      }
+
+      const pullRequestUserId = getPullRequestUserId(pullRequest)
+      if (!selectedUserIdSet.has(pullRequestUserId)) {
         continue
       }
 
@@ -1181,7 +1257,15 @@ type ActivityChartDatum = {
   [repoSeriesKey: string]: number | string
 }
 
-function buildActivityChartData(series: AggregatedBucketPoint[], repoIds: string[]): ActivityChartDatum[] {
+type ActivitySeriesDimension = 'repo' | 'user'
+
+function buildActivityChartData(
+  series: AggregatedBucketPoint[],
+  entityIds: string[],
+  dimension: ActivitySeriesDimension,
+): ActivityChartDatum[] {
+  const seriesKeyPrefix = dimension === 'repo' ? 'repo' : 'user'
+
   return series.map((point) => {
     const chartPoint: ActivityChartDatum = {
       bucketStart: point.bucketStart,
@@ -1189,13 +1273,28 @@ function buildActivityChartData(series: AggregatedBucketPoint[], repoIds: string
       total: point.total,
     }
 
-    for (const repoId of repoIds) {
-      const key = `repo:${repoId}`
-      chartPoint[key] = point.byRepo[repoId] ?? 0
+    for (const entityId of entityIds) {
+      const key = `${seriesKeyPrefix}:${entityId}`
+      chartPoint[key] = dimension === 'repo' ? point.byRepo[entityId] ?? 0 : point.byUser[entityId] ?? 0
     }
 
     return chartPoint
   })
+}
+
+function getActiveUserIdsFromSeries(series: AggregatedBucketPoint[], candidateUserIds: string[]): string[] {
+  if (candidateUserIds.length === 0) {
+    return []
+  }
+
+  const totalsByUser: Record<string, number> = {}
+  for (const point of series) {
+    for (const userId of candidateUserIds) {
+      totalsByUser[userId] = (totalsByUser[userId] ?? 0) + (point.byUser[userId] ?? 0)
+    }
+  }
+
+  return candidateUserIds.filter((userId) => (totalsByUser[userId] ?? 0) > 0)
 }
 
 function buildCumulativeChartData(
@@ -1251,9 +1350,9 @@ function ActivityLineChart({
     return <p className="commits-chart-empty">{emptyMessage}</p>
   }
 
-  const hasPerRepoLines = lines.length > 0
-  if (breakdownMode === 'byRepo' && !hasPerRepoLines) {
-    return <p className="commits-chart-empty">No repositories available for per-repo breakdown.</p>
+  const hasBreakdownLines = lines.length > 0
+  if (breakdownMode !== 'aggregate' && !hasBreakdownLines) {
+    return <p className="commits-chart-empty">No series available for this breakdown in the selected range.</p>
   }
 
   const showAggregate = breakdownMode === 'aggregate'
@@ -1263,7 +1362,7 @@ function ActivityLineChart({
 
   return (
     <div className="commits-chart-canvas">
-      <ResponsiveContainer width="100%" height={320}>
+      <ResponsiveContainer width="100%" height={480}>
         {chartStyle === 'bar' ? (
           <BarChart data={chartData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
@@ -1365,87 +1464,90 @@ function ActivityLineChart({
   )
 }
 
-function resolveMultiRepoSelection(selectedRepoIds: string[], availableRepoIds: string[]): string[] {
-  if (selectedRepoIds.includes(NO_REPO_SELECTION)) {
+function resolveSelectedIds(selectedIds: string[], availableIds: string[]): string[] {
+  if (selectedIds.includes(NO_REPO_SELECTION)) {
     return []
   }
 
-  const availableIdSet = new Set(availableRepoIds)
-  const validSelectedRepoIds = selectedRepoIds.filter((repoId) => availableIdSet.has(repoId))
-  return validSelectedRepoIds.length > 0 ? validSelectedRepoIds : availableRepoIds
+  const availableIdSet = new Set(availableIds)
+  const validSelectedIds = selectedIds.filter((selectedId) => availableIdSet.has(selectedId))
+  return validSelectedIds.length > 0 ? validSelectedIds : availableIds
 }
 
-function sanitizeMultiRepoSelection(selectedRepoIds: string[], availableRepoIds: string[]): string[] {
-  if (selectedRepoIds.includes(NO_REPO_SELECTION)) {
+function sanitizeSelectedIds(selectedIds: string[], availableIds: string[]): string[] {
+  if (selectedIds.includes(NO_REPO_SELECTION)) {
     return [NO_REPO_SELECTION]
   }
 
-  const availableIdSet = new Set(availableRepoIds)
-  return selectedRepoIds.filter((repoId) => availableIdSet.has(repoId))
+  const availableIdSet = new Set(availableIds)
+  return selectedIds.filter((selectedId) => availableIdSet.has(selectedId))
 }
 
-function RepoMultiSelectDropdown({
+function MultiSelectFilterDropdown({
   options,
-  selectedRepoIds,
+  selectedIds,
   onChange,
   disabled,
 }: {
-  options: LoadedRepoOption[]
-  selectedRepoIds: string[]
-  onChange: (nextRepoIds: string[]) => void
+  options: SelectFilterOption[]
+  selectedIds: string[]
+  onChange: (nextIds: string[]) => void
   disabled: boolean
 }) {
-  const repoOptions: RepoSelectOption[] = useMemo(
+  const normalizedOptions: MultiSelectOption[] = useMemo(
     () =>
-      options.map((repoOption) => ({
-        value: repoOption.repoId,
-        label: repoOption.repoName,
+      options.map((option) => ({
+        value: option.id,
+        label: option.label,
       })),
     [options],
   )
-  const dropdownOptions: RepoSelectOption[] = useMemo(
-    () => [{ value: ALL_REPOS_OPTION, label: 'All', isAll: true }, ...repoOptions],
-    [repoOptions],
+  const dropdownOptions: MultiSelectOption[] = useMemo(
+    () => [{ value: ALL_REPOS_OPTION, label: 'All', isAll: true }, ...normalizedOptions],
+    [normalizedOptions],
   )
-  const selectedRepoIdSet = useMemo(() => new Set(selectedRepoIds), [selectedRepoIds])
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds])
   const selectedValues = useMemo(
-    () => repoOptions.filter((repoOption) => selectedRepoIdSet.has(repoOption.value)),
-    [repoOptions, selectedRepoIdSet],
+    () => normalizedOptions.filter((option) => selectedIdSet.has(option.value)),
+    [normalizedOptions, selectedIdSet],
   )
-  const allSelected = repoOptions.length > 0 && selectedValues.length === repoOptions.length
+  const allSelected = normalizedOptions.length > 0 && selectedValues.length === normalizedOptions.length
   const selectedSummary =
-    repoOptions.length === 0 ? 'No repositories' : `${selectedValues.length}/${repoOptions.length} selected`
+    normalizedOptions.length === 0 ? 'No options' : `${selectedValues.length}/${normalizedOptions.length} selected`
   const dropdownWidthCh = useMemo(() => {
-    const longestRepoLabelLength = repoOptions.reduce((maxLength, repoOption) => Math.max(maxLength, repoOption.label.length), 0)
-    return Math.max(18, longestRepoLabelLength + 6)
-  }, [repoOptions])
+    const longestLabelLength = normalizedOptions.reduce(
+      (maxLength, option) => Math.max(maxLength, option.label.length),
+      0,
+    )
+    return Math.max(18, longestLabelLength + 6)
+  }, [normalizedOptions])
   const scrollbarWidthPx = 16
 
-  function handleSelectChange(nextValue: MultiValue<RepoSelectOption>) {
+  function handleSelectChange(nextValue: MultiValue<MultiSelectOption>) {
     const hasAllOption = nextValue.some((option) => option.isAll)
     if (hasAllOption) {
       if (allSelected) {
         onChange([NO_REPO_SELECTION])
       } else {
-        onChange(repoOptions.map((repoOption) => repoOption.value))
+        onChange(normalizedOptions.map((option) => option.value))
       }
       return
     }
 
-    const nextRepoIds = nextValue.filter((option) => !option.isAll).map((option) => option.value)
-    if (nextRepoIds.length === 0) {
+    const nextIds = nextValue.filter((option) => !option.isAll).map((option) => option.value)
+    if (nextIds.length === 0) {
       onChange([NO_REPO_SELECTION])
       return
     }
 
-    onChange(nextRepoIds.length > 0 ? nextRepoIds : [NO_REPO_SELECTION])
+    onChange(nextIds.length > 0 ? nextIds : [NO_REPO_SELECTION])
   }
 
-  function OptionRow(optionProps: OptionProps<RepoSelectOption, true>) {
+  function OptionRow(optionProps: OptionProps<MultiSelectOption, true>) {
     const optionData = optionProps.data
     const chosenValues = optionProps.getValue().filter((entry) => !entry.isAll)
-    const totalRepoOptions = (optionProps.options as RepoSelectOption[]).filter((entry) => !entry.isAll).length
-    const isAllChecked = totalRepoOptions > 0 && chosenValues.length === totalRepoOptions
+    const totalSelectableOptions = (optionProps.options as MultiSelectOption[]).filter((entry) => !entry.isAll).length
+    const isAllChecked = totalSelectableOptions > 0 && chosenValues.length === totalSelectableOptions
     const isChecked = optionData.isAll ? isAllChecked : chosenValues.some((entry) => entry.value === optionData.value)
     const isIndeterminate = Boolean(optionData.isAll && chosenValues.length > 0 && !isAllChecked)
 
@@ -1471,7 +1573,7 @@ function RepoMultiSelectDropdown({
   }
 
   return (
-    <Select<RepoSelectOption, true>
+    <Select<MultiSelectOption, true>
       classNamePrefix="repo-select"
       isMulti
       closeMenuOnSelect={false}
@@ -1484,7 +1586,7 @@ function RepoMultiSelectDropdown({
       value={selectedValues}
       onChange={handleSelectChange}
       placeholder={selectedSummary}
-      isDisabled={disabled || repoOptions.length === 0}
+      isDisabled={disabled || normalizedOptions.length === 0}
       styles={{
         container: (base) => ({
           ...base,
@@ -1584,6 +1686,7 @@ function App() {
   const [commitsChartEndDay, setCommitsChartEndDay] = useState('')
   const [commitsChartSingleRepoId, setCommitsChartSingleRepoId] = useState('')
   const [commitsChartMultiRepoIds, setCommitsChartMultiRepoIds] = useState<string[]>([])
+  const [commitsChartUserIds, setCommitsChartUserIds] = useState<string[]>([])
   const [prChartGranularity, setPrChartGranularity] = useState<AggregationGranularity>('weekly')
   const [prChartScopeMode, setPrChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [prChartStyle, setPrChartStyle] = useState<ChartStyle>('line')
@@ -1592,6 +1695,7 @@ function App() {
   const [prChartEndDay, setPrChartEndDay] = useState('')
   const [prChartSingleRepoId, setPrChartSingleRepoId] = useState('')
   const [prChartMultiRepoIds, setPrChartMultiRepoIds] = useState<string[]>([])
+  const [prChartUserIds, setPrChartUserIds] = useState<string[]>([])
   const [issuesOpenedChartGranularity, setIssuesOpenedChartGranularity] = useState<AggregationGranularity>('weekly')
   const [issuesOpenedChartScopeMode, setIssuesOpenedChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [issuesOpenedChartStyle, setIssuesOpenedChartStyle] = useState<ChartStyle>('line')
@@ -1600,6 +1704,7 @@ function App() {
   const [issuesOpenedChartEndDay, setIssuesOpenedChartEndDay] = useState('')
   const [issuesOpenedChartSingleRepoId, setIssuesOpenedChartSingleRepoId] = useState('')
   const [issuesOpenedChartMultiRepoIds, setIssuesOpenedChartMultiRepoIds] = useState<string[]>([])
+  const [issuesOpenedChartUserIds, setIssuesOpenedChartUserIds] = useState<string[]>([])
   const [issuesClosedChartGranularity, setIssuesClosedChartGranularity] = useState<AggregationGranularity>('weekly')
   const [issuesClosedChartScopeMode, setIssuesClosedChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [issuesClosedChartStyle, setIssuesClosedChartStyle] = useState<ChartStyle>('line')
@@ -1608,12 +1713,14 @@ function App() {
   const [issuesClosedChartEndDay, setIssuesClosedChartEndDay] = useState('')
   const [issuesClosedChartSingleRepoId, setIssuesClosedChartSingleRepoId] = useState('')
   const [issuesClosedChartMultiRepoIds, setIssuesClosedChartMultiRepoIds] = useState<string[]>([])
+  const [issuesClosedChartUserIds, setIssuesClosedChartUserIds] = useState<string[]>([])
   const [cycleChartGranularity, setCycleChartGranularity] = useState<AggregationGranularity>('weekly')
   const [cycleChartScopeMode, setCycleChartScopeMode] = useState<CommitsChartScopeMode>('multi')
   const [cycleChartStartDay, setCycleChartStartDay] = useState('')
   const [cycleChartEndDay, setCycleChartEndDay] = useState('')
   const [cycleChartSingleRepoId, setCycleChartSingleRepoId] = useState('')
   const [cycleChartMultiRepoIds, setCycleChartMultiRepoIds] = useState<string[]>([])
+  const [cycleChartUserIds, setCycleChartUserIds] = useState<string[]>([])
   const [cycleRollingWindow, setCycleRollingWindow] = useState<'2' | '4' | '8'>('4')
   const [globalChartGranularity, setGlobalChartGranularity] = useState<AggregationGranularity>('weekly')
   const [globalChartScopeMode, setGlobalChartScopeMode] = useState<CommitsChartScopeMode>('multi')
@@ -1623,6 +1730,7 @@ function App() {
   const [globalChartBreakdownMode, setGlobalChartBreakdownMode] = useState<ChartBreakdownMode>('aggregate')
   const [globalChartSingleRepoId, setGlobalChartSingleRepoId] = useState('')
   const [globalChartMultiRepoIds, setGlobalChartMultiRepoIds] = useState<string[]>([])
+  const [globalChartUserIds, setGlobalChartUserIds] = useState<string[]>([])
   const [globalCycleSmoothing, setGlobalCycleSmoothing] = useState<'2' | '4' | '8'>('4')
   const [globalFiltersMessage, setGlobalFiltersMessage] = useState('')
   const [globalFiltersMessageTone, setGlobalFiltersMessageTone] = useState<'idle' | 'success' | 'error'>('idle')
@@ -1955,6 +2063,7 @@ function App() {
     setCommitsChartEndDay('')
     setCommitsChartSingleRepoId('')
     setCommitsChartMultiRepoIds([])
+    setCommitsChartUserIds([])
     setPrChartGranularity('weekly')
     setPrChartScopeMode('multi')
     setPrChartStyle('line')
@@ -1963,6 +2072,7 @@ function App() {
     setPrChartEndDay('')
     setPrChartSingleRepoId('')
     setPrChartMultiRepoIds([])
+    setPrChartUserIds([])
     setIssuesOpenedChartGranularity('weekly')
     setIssuesOpenedChartScopeMode('multi')
     setIssuesOpenedChartStyle('line')
@@ -1971,6 +2081,7 @@ function App() {
     setIssuesOpenedChartEndDay('')
     setIssuesOpenedChartSingleRepoId('')
     setIssuesOpenedChartMultiRepoIds([])
+    setIssuesOpenedChartUserIds([])
     setIssuesClosedChartGranularity('weekly')
     setIssuesClosedChartScopeMode('multi')
     setIssuesClosedChartStyle('line')
@@ -1979,12 +2090,14 @@ function App() {
     setIssuesClosedChartEndDay('')
     setIssuesClosedChartSingleRepoId('')
     setIssuesClosedChartMultiRepoIds([])
+    setIssuesClosedChartUserIds([])
     setCycleChartGranularity('weekly')
     setCycleChartScopeMode('multi')
     setCycleChartStartDay('')
     setCycleChartEndDay('')
     setCycleChartSingleRepoId('')
     setCycleChartMultiRepoIds([])
+    setCycleChartUserIds([])
     setCycleRollingWindow('4')
     setGlobalChartGranularity('weekly')
     setGlobalChartScopeMode('multi')
@@ -1994,6 +2107,7 @@ function App() {
     setGlobalChartBreakdownMode('aggregate')
     setGlobalChartSingleRepoId('')
     setGlobalChartMultiRepoIds([])
+    setGlobalChartUserIds([])
     setGlobalCycleSmoothing('4')
     setGlobalFiltersMessage('')
     setGlobalFiltersMessageTone('idle')
@@ -2100,13 +2214,77 @@ function App() {
         .sort((left, right) => left.repoName.localeCompare(right.repoName)),
     [analysisDataByRepo, loadedRepoIds],
   )
+  const loadedRepoFilterOptions = useMemo<SelectFilterOption[]>(
+    () =>
+      loadedRepoOptions.map((repoOption) => ({
+        id: repoOption.repoId,
+        label: repoOption.repoName,
+      })),
+    [loadedRepoOptions],
+  )
+  const loadedUserOptions = useMemo<LoadedUserOption[]>(() => {
+    const userIds = new Set<string>()
+    for (const repoId of loadedRepoIds) {
+      const repoData = analysisDataByRepo[repoId]
+      if (!repoData) {
+        continue
+      }
+
+      for (const commit of repoData.commits) {
+        userIds.add(getCommitUserId(commit))
+      }
+      for (const pullRequest of repoData.pullRequests) {
+        userIds.add(getPullRequestUserId(pullRequest))
+      }
+      for (const pullRequest of repoData.pullRequestsOpened) {
+        userIds.add(getPullRequestUserId(pullRequest))
+      }
+      for (const issue of repoData.issuesOpened) {
+        userIds.add(getIssueUserId(issue))
+      }
+      for (const issue of repoData.issuesClosed) {
+        userIds.add(getIssueUserId(issue))
+      }
+    }
+
+    return Array.from(userIds)
+      .map((userId) => ({
+        userId,
+        userLabel: getUserDisplayLabel(userId),
+      }))
+      .sort((left, right) => left.userLabel.localeCompare(right.userLabel))
+  }, [analysisDataByRepo, loadedRepoIds])
+  const loadedUserIds = useMemo(() => loadedUserOptions.map((option) => option.userId), [loadedUserOptions])
+  const loadedUserFilterOptions = useMemo<SelectFilterOption[]>(
+    () =>
+      loadedUserOptions.map((option) => ({
+        id: option.userId,
+        label: option.userLabel,
+      })),
+    [loadedUserOptions],
+  )
+  const userLabelById = useMemo(() => {
+    const labelMap = new Map<string, string>()
+    for (const option of loadedUserOptions) {
+      labelMap.set(option.userId, option.userLabel)
+    }
+    return labelMap
+  }, [loadedUserOptions])
   const globalChartMultiRepoValue = useMemo(
-    () => resolveMultiRepoSelection(globalChartMultiRepoIds, loadedRepoIds),
+    () => resolveSelectedIds(globalChartMultiRepoIds, loadedRepoIds),
     [globalChartMultiRepoIds, loadedRepoIds],
   )
+  const globalChartUserValue = useMemo(
+    () => resolveSelectedIds(globalChartUserIds, loadedUserIds),
+    [globalChartUserIds, loadedUserIds],
+  )
   const commitsChartMultiRepoValue = useMemo(
-    () => resolveMultiRepoSelection(commitsChartMultiRepoIds, loadedRepoIds),
+    () => resolveSelectedIds(commitsChartMultiRepoIds, loadedRepoIds),
     [commitsChartMultiRepoIds, loadedRepoIds],
+  )
+  const commitsChartUserValue = useMemo(
+    () => resolveSelectedIds(commitsChartUserIds, loadedUserIds),
+    [commitsChartUserIds, loadedUserIds],
   )
   const commitsChartRepoIds = useMemo(() => {
     const effectiveSingleRepoId =
@@ -2138,21 +2316,33 @@ function App() {
       commitsChartRepoIds,
       commitsChartRangeResolution.range,
       commitsChartGranularity,
+      commitsChartUserValue,
     )
-  }, [analysisDataByRepo, commitsChartGranularity, commitsChartRangeResolution, commitsChartRepoIds])
-  const commitsChartData = useMemo(() => {
+  }, [analysisDataByRepo, commitsChartGranularity, commitsChartRangeResolution, commitsChartRepoIds, commitsChartUserValue])
+  const commitsChartRepoData = useMemo(() => {
     if (!commitsChartAggregation) {
       return [] as ActivityChartDatum[]
     }
 
-    return buildActivityChartData(commitsChartAggregation.series.commits, commitsChartAggregation.repoIds)
+    return buildActivityChartData(commitsChartAggregation.series.commits, commitsChartAggregation.repoIds, 'repo')
   }, [commitsChartAggregation])
+  const commitsActiveUserIds = useMemo(
+    () => getActiveUserIdsFromSeries(commitsChartAggregation?.series.commits ?? [], commitsChartUserValue),
+    [commitsChartAggregation, commitsChartUserValue],
+  )
+  const commitsChartUserData = useMemo(() => {
+    if (!commitsChartAggregation) {
+      return [] as ActivityChartDatum[]
+    }
+
+    return buildActivityChartData(commitsChartAggregation.series.commits, commitsActiveUserIds, 'user')
+  }, [commitsActiveUserIds, commitsChartAggregation])
   const commitsUnit = useMemo(() => getGranularityUnit(commitsChartGranularity), [commitsChartGranularity])
   const commitsPerTimeStats = useMemo(
     () => calculatePerTimeStats(commitsChartAggregation?.series.commits ?? []),
     [commitsChartAggregation],
   )
-  const commitsChartLines = useMemo(() => {
+  const commitsRepoChartLines = useMemo(() => {
     if (!commitsChartAggregation) {
       return [] as ActivityChartLine[]
     }
@@ -2163,9 +2353,30 @@ function App() {
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, commitsChartAggregation])
+  const commitsUserChartLines = useMemo(
+    () =>
+      commitsActiveUserIds.map((userId, index) => ({
+        dataKey: `user:${userId}`,
+        label: userLabelById.get(userId) ?? getUserDisplayLabel(userId),
+        color: CHART_COLORS[index % CHART_COLORS.length],
+      })),
+    [commitsActiveUserIds, userLabelById],
+  )
+  const commitsChartData = useMemo(
+    () => (commitsChartBreakdownMode === 'byUser' ? commitsChartUserData : commitsChartRepoData),
+    [commitsChartBreakdownMode, commitsChartRepoData, commitsChartUserData],
+  )
+  const commitsChartLines = useMemo(
+    () => (commitsChartBreakdownMode === 'byUser' ? commitsUserChartLines : commitsRepoChartLines),
+    [commitsChartBreakdownMode, commitsRepoChartLines, commitsUserChartLines],
+  )
   const prChartMultiRepoValue = useMemo(
-    () => resolveMultiRepoSelection(prChartMultiRepoIds, loadedRepoIds),
+    () => resolveSelectedIds(prChartMultiRepoIds, loadedRepoIds),
     [loadedRepoIds, prChartMultiRepoIds],
+  )
+  const prChartUserValue = useMemo(
+    () => resolveSelectedIds(prChartUserIds, loadedUserIds),
+    [loadedUserIds, prChartUserIds],
   )
   const prChartRepoIds = useMemo(() => {
     const effectiveSingleRepoId =
@@ -2190,22 +2401,50 @@ function App() {
       return null
     }
 
-    return aggregateRepositoryActivity(analysisDataByRepo, prChartRepoIds, prChartRangeResolution.range, prChartGranularity)
-  }, [analysisDataByRepo, prChartGranularity, prChartRangeResolution, prChartRepoIds])
-  const prMergedChartData = useMemo(() => {
+    return aggregateRepositoryActivity(
+      analysisDataByRepo,
+      prChartRepoIds,
+      prChartRangeResolution.range,
+      prChartGranularity,
+      prChartUserValue,
+    )
+  }, [analysisDataByRepo, prChartGranularity, prChartRangeResolution, prChartRepoIds, prChartUserValue])
+  const prMergedRepoChartData = useMemo(() => {
     if (!prChartAggregation) {
       return [] as ActivityChartDatum[]
     }
 
-    return buildActivityChartData(prChartAggregation.series.prsMerged, prChartAggregation.repoIds)
+    return buildActivityChartData(prChartAggregation.series.prsMerged, prChartAggregation.repoIds, 'repo')
   }, [prChartAggregation])
-  const prOpenedChartData = useMemo(() => {
+  const prOpenedRepoChartData = useMemo(() => {
     if (!prChartAggregation) {
       return [] as ActivityChartDatum[]
     }
 
-    return buildActivityChartData(prChartAggregation.series.prsOpened, prChartAggregation.repoIds)
+    return buildActivityChartData(prChartAggregation.series.prsOpened, prChartAggregation.repoIds, 'repo')
   }, [prChartAggregation])
+  const prMergedActiveUserIds = useMemo(
+    () => getActiveUserIdsFromSeries(prChartAggregation?.series.prsMerged ?? [], prChartUserValue),
+    [prChartAggregation, prChartUserValue],
+  )
+  const prOpenedActiveUserIds = useMemo(
+    () => getActiveUserIdsFromSeries(prChartAggregation?.series.prsOpened ?? [], prChartUserValue),
+    [prChartAggregation, prChartUserValue],
+  )
+  const prMergedUserChartData = useMemo(() => {
+    if (!prChartAggregation) {
+      return [] as ActivityChartDatum[]
+    }
+
+    return buildActivityChartData(prChartAggregation.series.prsMerged, prMergedActiveUserIds, 'user')
+  }, [prChartAggregation, prMergedActiveUserIds])
+  const prOpenedUserChartData = useMemo(() => {
+    if (!prChartAggregation) {
+      return [] as ActivityChartDatum[]
+    }
+
+    return buildActivityChartData(prChartAggregation.series.prsOpened, prOpenedActiveUserIds, 'user')
+  }, [prChartAggregation, prOpenedActiveUserIds])
   const prUnit = useMemo(() => getGranularityUnit(prChartGranularity), [prChartGranularity])
   const prOpenedPerTimeStats = useMemo(
     () => calculatePerTimeStats(prChartAggregation?.series.prsOpened ?? []),
@@ -2215,7 +2454,7 @@ function App() {
     () => calculatePerTimeStats(prChartAggregation?.series.prsMerged ?? []),
     [prChartAggregation],
   )
-  const prChartLines = useMemo(() => {
+  const prRepoChartLines = useMemo(() => {
     if (!prChartAggregation) {
       return [] as ActivityChartLine[]
     }
@@ -2226,9 +2465,47 @@ function App() {
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, prChartAggregation])
+  const prMergedUserChartLines = useMemo(
+    () =>
+      prMergedActiveUserIds.map((userId, index) => ({
+        dataKey: `user:${userId}`,
+        label: userLabelById.get(userId) ?? getUserDisplayLabel(userId),
+        color: CHART_COLORS[index % CHART_COLORS.length],
+      })),
+    [prMergedActiveUserIds, userLabelById],
+  )
+  const prOpenedUserChartLines = useMemo(
+    () =>
+      prOpenedActiveUserIds.map((userId, index) => ({
+        dataKey: `user:${userId}`,
+        label: userLabelById.get(userId) ?? getUserDisplayLabel(userId),
+        color: CHART_COLORS[index % CHART_COLORS.length],
+      })),
+    [prOpenedActiveUserIds, userLabelById],
+  )
+  const prOpenedChartData = useMemo(
+    () => (prChartBreakdownMode === 'byUser' ? prOpenedUserChartData : prOpenedRepoChartData),
+    [prChartBreakdownMode, prOpenedRepoChartData, prOpenedUserChartData],
+  )
+  const prMergedChartData = useMemo(
+    () => (prChartBreakdownMode === 'byUser' ? prMergedUserChartData : prMergedRepoChartData),
+    [prChartBreakdownMode, prMergedRepoChartData, prMergedUserChartData],
+  )
+  const prOpenedChartLines = useMemo(
+    () => (prChartBreakdownMode === 'byUser' ? prOpenedUserChartLines : prRepoChartLines),
+    [prChartBreakdownMode, prOpenedUserChartLines, prRepoChartLines],
+  )
+  const prMergedChartLines = useMemo(
+    () => (prChartBreakdownMode === 'byUser' ? prMergedUserChartLines : prRepoChartLines),
+    [prChartBreakdownMode, prMergedUserChartLines, prRepoChartLines],
+  )
   const issuesOpenedChartMultiRepoValue = useMemo(
-    () => resolveMultiRepoSelection(issuesOpenedChartMultiRepoIds, loadedRepoIds),
+    () => resolveSelectedIds(issuesOpenedChartMultiRepoIds, loadedRepoIds),
     [issuesOpenedChartMultiRepoIds, loadedRepoIds],
+  )
+  const issuesOpenedChartUserValue = useMemo(
+    () => resolveSelectedIds(issuesOpenedChartUserIds, loadedUserIds),
+    [issuesOpenedChartUserIds, loadedUserIds],
   )
   const issuesOpenedChartRepoIds = useMemo(() => {
     const effectiveSingleRepoId =
@@ -2266,21 +2543,43 @@ function App() {
       issuesOpenedChartRepoIds,
       issuesOpenedChartRangeResolution.range,
       issuesOpenedChartGranularity,
+      issuesOpenedChartUserValue,
     )
-  }, [analysisDataByRepo, issuesOpenedChartGranularity, issuesOpenedChartRangeResolution, issuesOpenedChartRepoIds])
-  const issuesOpenedChartData = useMemo(() => {
+  }, [
+    analysisDataByRepo,
+    issuesOpenedChartGranularity,
+    issuesOpenedChartRangeResolution,
+    issuesOpenedChartRepoIds,
+    issuesOpenedChartUserValue,
+  ])
+  const issuesOpenedRepoChartData = useMemo(() => {
     if (!issuesOpenedChartAggregation) {
       return [] as ActivityChartDatum[]
     }
 
-    return buildActivityChartData(issuesOpenedChartAggregation.series.issuesOpened, issuesOpenedChartAggregation.repoIds)
+    return buildActivityChartData(
+      issuesOpenedChartAggregation.series.issuesOpened,
+      issuesOpenedChartAggregation.repoIds,
+      'repo',
+    )
   }, [issuesOpenedChartAggregation])
+  const issuesOpenedActiveUserIds = useMemo(
+    () => getActiveUserIdsFromSeries(issuesOpenedChartAggregation?.series.issuesOpened ?? [], issuesOpenedChartUserValue),
+    [issuesOpenedChartAggregation, issuesOpenedChartUserValue],
+  )
+  const issuesOpenedUserChartData = useMemo(() => {
+    if (!issuesOpenedChartAggregation) {
+      return [] as ActivityChartDatum[]
+    }
+
+    return buildActivityChartData(issuesOpenedChartAggregation.series.issuesOpened, issuesOpenedActiveUserIds, 'user')
+  }, [issuesOpenedActiveUserIds, issuesOpenedChartAggregation])
   const issuesOpenedUnit = useMemo(() => getGranularityUnit(issuesOpenedChartGranularity), [issuesOpenedChartGranularity])
   const issuesOpenedPerTimeStats = useMemo(
     () => calculatePerTimeStats(issuesOpenedChartAggregation?.series.issuesOpened ?? []),
     [issuesOpenedChartAggregation],
   )
-  const issuesOpenedChartLines = useMemo(() => {
+  const issuesOpenedRepoChartLines = useMemo(() => {
     if (!issuesOpenedChartAggregation) {
       return [] as ActivityChartLine[]
     }
@@ -2291,9 +2590,30 @@ function App() {
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, issuesOpenedChartAggregation])
+  const issuesOpenedUserChartLines = useMemo(
+    () =>
+      issuesOpenedActiveUserIds.map((userId, index) => ({
+        dataKey: `user:${userId}`,
+        label: userLabelById.get(userId) ?? getUserDisplayLabel(userId),
+        color: CHART_COLORS[index % CHART_COLORS.length],
+      })),
+    [issuesOpenedActiveUserIds, userLabelById],
+  )
+  const issuesOpenedChartData = useMemo(
+    () => (issuesOpenedChartBreakdownMode === 'byUser' ? issuesOpenedUserChartData : issuesOpenedRepoChartData),
+    [issuesOpenedChartBreakdownMode, issuesOpenedRepoChartData, issuesOpenedUserChartData],
+  )
+  const issuesOpenedChartLines = useMemo(
+    () => (issuesOpenedChartBreakdownMode === 'byUser' ? issuesOpenedUserChartLines : issuesOpenedRepoChartLines),
+    [issuesOpenedChartBreakdownMode, issuesOpenedRepoChartLines, issuesOpenedUserChartLines],
+  )
   const issuesClosedChartMultiRepoValue = useMemo(
-    () => resolveMultiRepoSelection(issuesClosedChartMultiRepoIds, loadedRepoIds),
+    () => resolveSelectedIds(issuesClosedChartMultiRepoIds, loadedRepoIds),
     [issuesClosedChartMultiRepoIds, loadedRepoIds],
+  )
+  const issuesClosedChartUserValue = useMemo(
+    () => resolveSelectedIds(issuesClosedChartUserIds, loadedUserIds),
+    [issuesClosedChartUserIds, loadedUserIds],
   )
   const issuesClosedChartRepoIds = useMemo(() => {
     const effectiveSingleRepoId =
@@ -2331,21 +2651,43 @@ function App() {
       issuesClosedChartRepoIds,
       issuesClosedChartRangeResolution.range,
       issuesClosedChartGranularity,
+      issuesClosedChartUserValue,
     )
-  }, [analysisDataByRepo, issuesClosedChartGranularity, issuesClosedChartRangeResolution, issuesClosedChartRepoIds])
-  const issuesClosedChartData = useMemo(() => {
+  }, [
+    analysisDataByRepo,
+    issuesClosedChartGranularity,
+    issuesClosedChartRangeResolution,
+    issuesClosedChartRepoIds,
+    issuesClosedChartUserValue,
+  ])
+  const issuesClosedRepoChartData = useMemo(() => {
     if (!issuesClosedChartAggregation) {
       return [] as ActivityChartDatum[]
     }
 
-    return buildActivityChartData(issuesClosedChartAggregation.series.issuesClosed, issuesClosedChartAggregation.repoIds)
+    return buildActivityChartData(
+      issuesClosedChartAggregation.series.issuesClosed,
+      issuesClosedChartAggregation.repoIds,
+      'repo',
+    )
   }, [issuesClosedChartAggregation])
+  const issuesClosedActiveUserIds = useMemo(
+    () => getActiveUserIdsFromSeries(issuesClosedChartAggregation?.series.issuesClosed ?? [], issuesClosedChartUserValue),
+    [issuesClosedChartAggregation, issuesClosedChartUserValue],
+  )
+  const issuesClosedUserChartData = useMemo(() => {
+    if (!issuesClosedChartAggregation) {
+      return [] as ActivityChartDatum[]
+    }
+
+    return buildActivityChartData(issuesClosedChartAggregation.series.issuesClosed, issuesClosedActiveUserIds, 'user')
+  }, [issuesClosedActiveUserIds, issuesClosedChartAggregation])
   const issuesClosedUnit = useMemo(() => getGranularityUnit(issuesClosedChartGranularity), [issuesClosedChartGranularity])
   const issuesClosedPerTimeStats = useMemo(
     () => calculatePerTimeStats(issuesClosedChartAggregation?.series.issuesClosed ?? []),
     [issuesClosedChartAggregation],
   )
-  const issuesClosedChartLines = useMemo(() => {
+  const issuesClosedRepoChartLines = useMemo(() => {
     if (!issuesClosedChartAggregation) {
       return [] as ActivityChartLine[]
     }
@@ -2356,9 +2698,30 @@ function App() {
       color: CHART_COLORS[index % CHART_COLORS.length],
     }))
   }, [analysisDataByRepo, issuesClosedChartAggregation])
+  const issuesClosedUserChartLines = useMemo(
+    () =>
+      issuesClosedActiveUserIds.map((userId, index) => ({
+        dataKey: `user:${userId}`,
+        label: userLabelById.get(userId) ?? getUserDisplayLabel(userId),
+        color: CHART_COLORS[index % CHART_COLORS.length],
+      })),
+    [issuesClosedActiveUserIds, userLabelById],
+  )
+  const issuesClosedChartData = useMemo(
+    () => (issuesClosedChartBreakdownMode === 'byUser' ? issuesClosedUserChartData : issuesClosedRepoChartData),
+    [issuesClosedChartBreakdownMode, issuesClosedRepoChartData, issuesClosedUserChartData],
+  )
+  const issuesClosedChartLines = useMemo(
+    () => (issuesClosedChartBreakdownMode === 'byUser' ? issuesClosedUserChartLines : issuesClosedRepoChartLines),
+    [issuesClosedChartBreakdownMode, issuesClosedRepoChartLines, issuesClosedUserChartLines],
+  )
   const cycleChartMultiRepoValue = useMemo(
-    () => resolveMultiRepoSelection(cycleChartMultiRepoIds, loadedRepoIds),
+    () => resolveSelectedIds(cycleChartMultiRepoIds, loadedRepoIds),
     [cycleChartMultiRepoIds, loadedRepoIds],
+  )
+  const cycleChartUserValue = useMemo(
+    () => resolveSelectedIds(cycleChartUserIds, loadedUserIds),
+    [cycleChartUserIds, loadedUserIds],
   )
   const cycleChartRepoIds = useMemo(() => {
     const effectiveSingleRepoId =
@@ -2390,8 +2753,9 @@ function App() {
       cycleChartRepoIds,
       cycleChartRangeResolution.range,
       cycleChartGranularity,
+      cycleChartUserValue,
     )
-  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRangeResolution, cycleChartRepoIds])
+  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRangeResolution, cycleChartRepoIds, cycleChartUserValue])
   const cycleMergeTimeTrend = useMemo(() => {
     if (!cycleChartRangeResolution.ok || cycleChartRepoIds.length === 0) {
       return [] as MergeTimeTrendPoint[]
@@ -2402,8 +2766,9 @@ function App() {
       cycleChartRepoIds,
       cycleChartRangeResolution.range,
       cycleChartGranularity,
+      cycleChartUserValue,
     )
-  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRangeResolution, cycleChartRepoIds])
+  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRangeResolution, cycleChartRepoIds, cycleChartUserValue])
   const cycleRollingWindowSize = Number(cycleRollingWindow)
   const cycleMergeTimeTrendData = useMemo(
     () => buildMergeTimeTrendChartData(cycleMergeTimeTrend, cycleRollingWindowSize),
@@ -2452,7 +2817,8 @@ function App() {
       return
     }
 
-    const validMultiRepoIds = sanitizeMultiRepoSelection(globalChartMultiRepoIds, loadedRepoIds)
+    const validMultiRepoIds = sanitizeSelectedIds(globalChartMultiRepoIds, loadedRepoIds)
+    const validUserIds = sanitizeSelectedIds(globalChartUserIds, loadedUserIds)
 
     setCommitsChartGranularity(globalChartGranularity)
     setCommitsChartScopeMode(globalChartScopeMode)
@@ -2462,6 +2828,7 @@ function App() {
     setCommitsChartBreakdownMode(globalChartBreakdownMode)
     setCommitsChartSingleRepoId(globalChartSingleRepoId)
     setCommitsChartMultiRepoIds(validMultiRepoIds)
+    setCommitsChartUserIds(validUserIds)
 
     setPrChartGranularity(globalChartGranularity)
     setPrChartScopeMode(globalChartScopeMode)
@@ -2471,6 +2838,7 @@ function App() {
     setPrChartBreakdownMode(globalChartBreakdownMode)
     setPrChartSingleRepoId(globalChartSingleRepoId)
     setPrChartMultiRepoIds(validMultiRepoIds)
+    setPrChartUserIds(validUserIds)
 
     setIssuesOpenedChartGranularity(globalChartGranularity)
     setIssuesOpenedChartScopeMode(globalChartScopeMode)
@@ -2480,6 +2848,7 @@ function App() {
     setIssuesOpenedChartBreakdownMode(globalChartBreakdownMode)
     setIssuesOpenedChartSingleRepoId(globalChartSingleRepoId)
     setIssuesOpenedChartMultiRepoIds(validMultiRepoIds)
+    setIssuesOpenedChartUserIds(validUserIds)
 
     setIssuesClosedChartGranularity(globalChartGranularity)
     setIssuesClosedChartScopeMode(globalChartScopeMode)
@@ -2489,6 +2858,7 @@ function App() {
     setIssuesClosedChartBreakdownMode(globalChartBreakdownMode)
     setIssuesClosedChartSingleRepoId(globalChartSingleRepoId)
     setIssuesClosedChartMultiRepoIds(validMultiRepoIds)
+    setIssuesClosedChartUserIds(validUserIds)
 
     setCycleChartGranularity(globalChartGranularity)
     setCycleChartScopeMode(globalChartScopeMode)
@@ -2496,6 +2866,7 @@ function App() {
     setCycleChartEndDay(globalChartEndDay)
     setCycleChartSingleRepoId(globalChartSingleRepoId)
     setCycleChartMultiRepoIds(validMultiRepoIds)
+    setCycleChartUserIds(validUserIds)
     setCycleRollingWindow(globalCycleSmoothing)
 
     setGlobalFiltersMessageTone('success')
@@ -3094,6 +3465,7 @@ function App() {
                   setCommitsChartEndDay('')
                   setCommitsChartSingleRepoId('')
                   setCommitsChartMultiRepoIds([])
+                  setCommitsChartUserIds([])
                   setPrChartGranularity('weekly')
                   setPrChartScopeMode('multi')
                   setPrChartStyle('line')
@@ -3102,6 +3474,7 @@ function App() {
                   setPrChartEndDay('')
                   setPrChartSingleRepoId('')
                   setPrChartMultiRepoIds([])
+                  setPrChartUserIds([])
                   setIssuesOpenedChartGranularity('weekly')
                   setIssuesOpenedChartScopeMode('multi')
                   setIssuesOpenedChartStyle('line')
@@ -3110,6 +3483,7 @@ function App() {
                   setIssuesOpenedChartEndDay('')
                   setIssuesOpenedChartSingleRepoId('')
                   setIssuesOpenedChartMultiRepoIds([])
+                  setIssuesOpenedChartUserIds([])
                   setIssuesClosedChartGranularity('weekly')
                   setIssuesClosedChartScopeMode('multi')
                   setIssuesClosedChartStyle('line')
@@ -3118,12 +3492,14 @@ function App() {
                   setIssuesClosedChartEndDay('')
                   setIssuesClosedChartSingleRepoId('')
                   setIssuesClosedChartMultiRepoIds([])
+                  setIssuesClosedChartUserIds([])
                   setCycleChartGranularity('weekly')
                   setCycleChartScopeMode('multi')
                   setCycleChartStartDay('')
                   setCycleChartEndDay('')
                   setCycleChartSingleRepoId('')
                   setCycleChartMultiRepoIds([])
+                  setCycleChartUserIds([])
                   setCycleRollingWindow('4')
                   setGlobalChartGranularity('weekly')
                   setGlobalChartScopeMode('multi')
@@ -3133,6 +3509,7 @@ function App() {
                   setGlobalChartBreakdownMode('aggregate')
                   setGlobalChartSingleRepoId('')
                   setGlobalChartMultiRepoIds([])
+                  setGlobalChartUserIds([])
                   setGlobalCycleSmoothing('4')
                   setGlobalFiltersMessage('')
                   setGlobalFiltersMessageTone('idle')
@@ -3416,14 +3793,23 @@ function App() {
           </label>
           <label>
             Repositories
-            <RepoMultiSelectDropdown
-              options={loadedRepoOptions}
-              selectedRepoIds={globalChartMultiRepoValue}
+            <MultiSelectFilterDropdown
+              options={loadedRepoFilterOptions}
+              selectedIds={globalChartMultiRepoValue}
               onChange={(nextRepoIds) => {
                 setGlobalChartScopeMode('multi')
                 setGlobalChartMultiRepoIds(nextRepoIds)
               }}
               disabled={loadedRepoOptions.length === 0}
+            />
+          </label>
+          <label>
+            Users
+            <MultiSelectFilterDropdown
+              options={loadedUserFilterOptions}
+              selectedIds={globalChartUserValue}
+              onChange={setGlobalChartUserIds}
+              disabled={loadedUserOptions.length === 0}
             />
           </label>
           <label>
@@ -3469,6 +3855,7 @@ function App() {
             >
               <option value="aggregate">Total</option>
               <option value="byRepo">Per repo</option>
+              <option value="byUser">Per user</option>
             </select>
           </label>
           <label>
@@ -3510,14 +3897,23 @@ function App() {
               </label>
               <label>
                 Repositories
-                <RepoMultiSelectDropdown
-                  options={loadedRepoOptions}
-                  selectedRepoIds={commitsChartMultiRepoValue}
+                <MultiSelectFilterDropdown
+                  options={loadedRepoFilterOptions}
+                  selectedIds={commitsChartMultiRepoValue}
                   onChange={(nextRepoIds) => {
                     setCommitsChartScopeMode('multi')
                     setCommitsChartMultiRepoIds(nextRepoIds)
                   }}
                   disabled={loadedRepoOptions.length === 0}
+                />
+              </label>
+              <label>
+                Users
+                <MultiSelectFilterDropdown
+                  options={loadedUserFilterOptions}
+                  selectedIds={commitsChartUserValue}
+                  onChange={setCommitsChartUserIds}
+                  disabled={loadedUserOptions.length === 0}
                 />
               </label>
               <label>
@@ -3563,6 +3959,7 @@ function App() {
                 >
                   <option value="aggregate">Total</option>
                   <option value="byRepo">Per repo</option>
+                  <option value="byUser">Per user</option>
                 </select>
               </label>
             </div>
@@ -3617,14 +4014,23 @@ function App() {
               </label>
               <label>
                 Repositories
-                <RepoMultiSelectDropdown
-                  options={loadedRepoOptions}
-                  selectedRepoIds={prChartMultiRepoValue}
+                <MultiSelectFilterDropdown
+                  options={loadedRepoFilterOptions}
+                  selectedIds={prChartMultiRepoValue}
                   onChange={(nextRepoIds) => {
                     setPrChartScopeMode('multi')
                     setPrChartMultiRepoIds(nextRepoIds)
                   }}
                   disabled={loadedRepoOptions.length === 0}
+                />
+              </label>
+              <label>
+                Users
+                <MultiSelectFilterDropdown
+                  options={loadedUserFilterOptions}
+                  selectedIds={prChartUserValue}
+                  onChange={setPrChartUserIds}
+                  disabled={loadedUserOptions.length === 0}
                 />
               </label>
               <label>
@@ -3670,6 +4076,7 @@ function App() {
                 >
                   <option value="aggregate">Total</option>
                   <option value="byRepo">Per repo</option>
+                  <option value="byUser">Per user</option>
                 </select>
               </label>
             </div>
@@ -3696,7 +4103,7 @@ function App() {
                 data={prOpenedChartData}
                 breakdownMode={prChartBreakdownMode}
                 chartStyle={prChartStyle}
-                lines={prChartLines}
+                lines={prOpenedChartLines}
                 aggregateLabel="Opened PRs"
                 emptyMessage="No opened PR buckets in this range."
               />
@@ -3724,14 +4131,23 @@ function App() {
               </label>
               <label>
                 Repositories
-                <RepoMultiSelectDropdown
-                  options={loadedRepoOptions}
-                  selectedRepoIds={prChartMultiRepoValue}
+                <MultiSelectFilterDropdown
+                  options={loadedRepoFilterOptions}
+                  selectedIds={prChartMultiRepoValue}
                   onChange={(nextRepoIds) => {
                     setPrChartScopeMode('multi')
                     setPrChartMultiRepoIds(nextRepoIds)
                   }}
                   disabled={loadedRepoOptions.length === 0}
+                />
+              </label>
+              <label>
+                Users
+                <MultiSelectFilterDropdown
+                  options={loadedUserFilterOptions}
+                  selectedIds={prChartUserValue}
+                  onChange={setPrChartUserIds}
+                  disabled={loadedUserOptions.length === 0}
                 />
               </label>
               <label>
@@ -3777,6 +4193,7 @@ function App() {
                 >
                   <option value="aggregate">Total</option>
                   <option value="byRepo">Per repo</option>
+                  <option value="byUser">Per user</option>
                 </select>
               </label>
             </div>
@@ -3803,7 +4220,7 @@ function App() {
                 data={prMergedChartData}
                 breakdownMode={prChartBreakdownMode}
                 chartStyle={prChartStyle}
-                lines={prChartLines}
+                lines={prMergedChartLines}
                 aggregateLabel="Merged PRs"
                 emptyMessage="No merged PR buckets in this range."
               />
@@ -3831,14 +4248,23 @@ function App() {
               </label>
               <label>
                 Repositories
-                <RepoMultiSelectDropdown
-                  options={loadedRepoOptions}
-                  selectedRepoIds={issuesOpenedChartMultiRepoValue}
+                <MultiSelectFilterDropdown
+                  options={loadedRepoFilterOptions}
+                  selectedIds={issuesOpenedChartMultiRepoValue}
                   onChange={(nextRepoIds) => {
                     setIssuesOpenedChartScopeMode('multi')
                     setIssuesOpenedChartMultiRepoIds(nextRepoIds)
                   }}
                   disabled={loadedRepoOptions.length === 0}
+                />
+              </label>
+              <label>
+                Users
+                <MultiSelectFilterDropdown
+                  options={loadedUserFilterOptions}
+                  selectedIds={issuesOpenedChartUserValue}
+                  onChange={setIssuesOpenedChartUserIds}
+                  disabled={loadedUserOptions.length === 0}
                 />
               </label>
               <label>
@@ -3884,6 +4310,7 @@ function App() {
                 >
                   <option value="aggregate">Total</option>
                   <option value="byRepo">Per repo</option>
+                  <option value="byUser">Per user</option>
                 </select>
               </label>
             </div>
@@ -3940,14 +4367,23 @@ function App() {
               </label>
               <label>
                 Repositories
-                <RepoMultiSelectDropdown
-                  options={loadedRepoOptions}
-                  selectedRepoIds={issuesClosedChartMultiRepoValue}
+                <MultiSelectFilterDropdown
+                  options={loadedRepoFilterOptions}
+                  selectedIds={issuesClosedChartMultiRepoValue}
                   onChange={(nextRepoIds) => {
                     setIssuesClosedChartScopeMode('multi')
                     setIssuesClosedChartMultiRepoIds(nextRepoIds)
                   }}
                   disabled={loadedRepoOptions.length === 0}
+                />
+              </label>
+              <label>
+                Users
+                <MultiSelectFilterDropdown
+                  options={loadedUserFilterOptions}
+                  selectedIds={issuesClosedChartUserValue}
+                  onChange={setIssuesClosedChartUserIds}
+                  disabled={loadedUserOptions.length === 0}
                 />
               </label>
               <label>
@@ -3993,6 +4429,7 @@ function App() {
                 >
                   <option value="aggregate">Total</option>
                   <option value="byRepo">Per repo</option>
+                  <option value="byUser">Per user</option>
                 </select>
               </label>
             </div>
@@ -4049,14 +4486,23 @@ function App() {
               </label>
               <label>
                 Repositories
-                <RepoMultiSelectDropdown
-                  options={loadedRepoOptions}
-                  selectedRepoIds={cycleChartMultiRepoValue}
+                <MultiSelectFilterDropdown
+                  options={loadedRepoFilterOptions}
+                  selectedIds={cycleChartMultiRepoValue}
                   onChange={(nextRepoIds) => {
                     setCycleChartScopeMode('multi')
                     setCycleChartMultiRepoIds(nextRepoIds)
                   }}
                   disabled={loadedRepoOptions.length === 0}
+                />
+              </label>
+              <label>
+                Users
+                <MultiSelectFilterDropdown
+                  options={loadedUserFilterOptions}
+                  selectedIds={cycleChartUserValue}
+                  onChange={setCycleChartUserIds}
+                  disabled={loadedUserOptions.length === 0}
                 />
               </label>
               <label>
@@ -4135,7 +4581,7 @@ function App() {
                   <p className="commits-chart-empty">No merge-time trend points in this range.</p>
                 ) : (
                   <div className="commits-chart-canvas">
-                    <ResponsiveContainer width="100%" height={300}>
+                    <ResponsiveContainer width="100%" height={450}>
                       <LineChart data={cycleMergeTimeTrendData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
                         <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
