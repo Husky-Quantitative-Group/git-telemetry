@@ -188,7 +188,7 @@ type PullRequestRecord = {
   title: string
   url: string
   createdAt: string
-  mergedAt: string
+  mergedAt: string | null
   isDraft: boolean
   authorLogin?: string
 }
@@ -247,6 +247,7 @@ type RepoAnalysisData = {
   repoName: string
   defaultBranch?: string
   pullRequests: PullRequestRecord[]
+  pullRequestsOpened: PullRequestRecord[]
   issuesOpened: IssueRecord[]
   issuesClosed: IssueRecord[]
   commits: CommitRecord[]
@@ -257,6 +258,7 @@ type RepoRawAnalysisData = {
   repoName: string
   defaultBranch?: string
   pullRequests: RawPullRequestRecord[]
+  pullRequestsOpened: RawPullRequestRecord[]
   issuesOpened: RawIssueRecord[]
   issuesClosed: RawIssueRecord[]
   commits: RawCommitRecord[]
@@ -278,6 +280,7 @@ type AggregatedRepoTotals = {
   repoId: string
   repoName: string
   commits: number
+  prsOpened: number
   prsMerged: number
   issuesOpened: number
   issuesClosed: number
@@ -292,6 +295,7 @@ type AggregatedActivity = {
   repoIds: string[]
   totals: {
     commits: number
+    prsOpened: number
     prsMerged: number
     issuesOpened: number
     issuesClosed: number
@@ -303,6 +307,7 @@ type AggregatedActivity = {
   }
   series: {
     commits: AggregatedBucketPoint[]
+    prsOpened: AggregatedBucketPoint[]
     prsMerged: AggregatedBucketPoint[]
     issuesOpened: AggregatedBucketPoint[]
     issuesClosed: AggregatedBucketPoint[]
@@ -316,6 +321,10 @@ type MergeTimeTrendPoint = {
   count: number
   averageHours: number | null
   medianHours: number | null
+}
+
+type MergeTimeTrendChartPoint = MergeTimeTrendPoint & {
+  rollingAverageHours: number | null
 }
 
 type ViewerValidationData = {
@@ -541,25 +550,25 @@ function normalizeDefaultBranch(value: string | undefined): string | undefined {
   return normalizeText(value)
 }
 
-function normalizePullRequestRecords(rawRecords: RawPullRequestRecord[]): PullRequestRecord[] {
+function normalizePullRequestRecords(
+  rawRecords: RawPullRequestRecord[],
+  options?: { requireMergedAt?: boolean },
+): PullRequestRecord[] {
   const normalized: PullRequestRecord[] = []
   const seenIds = new Set<string>()
+  const requireMergedAt = options?.requireMergedAt ?? true
 
   for (const raw of rawRecords) {
     const id = normalizeText(raw.id)
     const title = normalizeText(raw.title)
     const url = normalizeText(raw.url)
     const createdAt = normalizeIsoTimestamp(raw.createdAt)
-    const mergedAt = normalizeIsoTimestamp(raw.mergedAt)
-    if (
-      !id ||
-      seenIds.has(id) ||
-      raw.number === undefined ||
-      !title ||
-      !url ||
-      !createdAt ||
-      !mergedAt
-    ) {
+    const mergedAt = normalizeIsoTimestamp(raw.mergedAt) ?? null
+    if (!id || seenIds.has(id) || raw.number === undefined || !title || !url || !createdAt) {
+      continue
+    }
+
+    if (requireMergedAt && !mergedAt) {
       continue
     }
 
@@ -639,7 +648,8 @@ function normalizeRepositoryAnalysisData(raw: RepoRawAnalysisData): RepoAnalysis
     repoId: raw.repoId,
     repoName: raw.repoName,
     defaultBranch: normalizeDefaultBranch(raw.defaultBranch),
-    pullRequests: normalizePullRequestRecords(raw.pullRequests),
+    pullRequests: normalizePullRequestRecords(raw.pullRequests, { requireMergedAt: true }),
+    pullRequestsOpened: normalizePullRequestRecords(raw.pullRequestsOpened, { requireMergedAt: false }),
     issuesOpened: normalizeIssueRecords(raw.issuesOpened),
     issuesClosed: normalizeIssueRecords(raw.issuesClosed),
     commits: normalizeCommitRecords(raw.commits),
@@ -738,6 +748,7 @@ function aggregateRepositoryActivity(
   const bucketTimeline = createBucketTimeline(range, granularity)
   const bucketPointMap = {
     commits: new Map<string, AggregatedBucketPoint>(),
+    prsOpened: new Map<string, AggregatedBucketPoint>(),
     prsMerged: new Map<string, AggregatedBucketPoint>(),
     issuesOpened: new Map<string, AggregatedBucketPoint>(),
     issuesClosed: new Map<string, AggregatedBucketPoint>(),
@@ -751,6 +762,7 @@ function aggregateRepositoryActivity(
       byRepo: {} as Record<string, number>,
     }
     bucketPointMap.commits.set(bucketStart, { ...pointBase, byRepo: {} })
+    bucketPointMap.prsOpened.set(bucketStart, { ...pointBase, byRepo: {} })
     bucketPointMap.prsMerged.set(bucketStart, { ...pointBase, byRepo: {} })
     bucketPointMap.issuesOpened.set(bucketStart, { ...pointBase, byRepo: {} })
     bucketPointMap.issuesClosed.set(bucketStart, { ...pointBase, byRepo: {} })
@@ -783,6 +795,7 @@ function aggregateRepositoryActivity(
     }
 
     let repoCommits = 0
+    let repoPrsOpened = 0
     let repoPrsMerged = 0
     let repoIssuesOpened = 0
     let repoIssuesClosed = 0
@@ -803,7 +816,26 @@ function aggregateRepositoryActivity(
       repoCommits += 1
     }
 
+    for (const pullRequest of repoData.pullRequestsOpened) {
+      const openedTime = new Date(pullRequest.createdAt).valueOf()
+      if (Number.isNaN(openedTime) || openedTime < rangeStartTime || openedTime > rangeEndTime) {
+        continue
+      }
+
+      const bucketStartDate = getBucketStartDate(pullRequest.createdAt, granularity)
+      if (!bucketStartDate) {
+        continue
+      }
+
+      addToBucket(bucketPointMap.prsOpened, bucketStartDate.toISOString(), repoId, 1)
+      repoPrsOpened += 1
+    }
+
     for (const pullRequest of repoData.pullRequests) {
+      if (!pullRequest.mergedAt) {
+        continue
+      }
+
       const mergedTime = new Date(pullRequest.mergedAt).valueOf()
       if (Number.isNaN(mergedTime) || mergedTime < rangeStartTime || mergedTime > rangeEndTime) {
         continue
@@ -863,6 +895,7 @@ function aggregateRepositoryActivity(
       repoId,
       repoName: repoData.repoName,
       commits: repoCommits,
+      prsOpened: repoPrsOpened,
       prsMerged: repoPrsMerged,
       issuesOpened: repoIssuesOpened,
       issuesClosed: repoIssuesClosed,
@@ -876,6 +909,9 @@ function aggregateRepositoryActivity(
 
   const commitsSeries = bucketTimeline
     .map((bucketStart) => bucketPointMap.commits.get(bucketStart))
+    .filter((point): point is AggregatedBucketPoint => point !== undefined)
+  const prsOpenedSeries = bucketTimeline
+    .map((bucketStart) => bucketPointMap.prsOpened.get(bucketStart))
     .filter((point): point is AggregatedBucketPoint => point !== undefined)
   const prsMergedSeries = bucketTimeline
     .map((bucketStart) => bucketPointMap.prsMerged.get(bucketStart))
@@ -893,6 +929,7 @@ function aggregateRepositoryActivity(
     repoIds,
     totals: {
       commits: commitsSeries.reduce((accumulator, point) => accumulator + point.total, 0),
+      prsOpened: prsOpenedSeries.reduce((accumulator, point) => accumulator + point.total, 0),
       prsMerged: prsMergedSeries.reduce((accumulator, point) => accumulator + point.total, 0),
       issuesOpened: issuesOpenedSeries.reduce((accumulator, point) => accumulator + point.total, 0),
       issuesClosed: issuesClosedSeries.reduce((accumulator, point) => accumulator + point.total, 0),
@@ -904,6 +941,7 @@ function aggregateRepositoryActivity(
     },
     series: {
       commits: commitsSeries,
+      prsOpened: prsOpenedSeries,
       prsMerged: prsMergedSeries,
       issuesOpened: issuesOpenedSeries,
       issuesClosed: issuesClosedSeries,
@@ -935,6 +973,10 @@ function aggregateMergeTimeTrend(
     }
 
     for (const pullRequest of repoData.pullRequests) {
+      if (!pullRequest.mergedAt) {
+        continue
+      }
+
       const mergedTime = new Date(pullRequest.mergedAt).valueOf()
       const createdTime = new Date(pullRequest.createdAt).valueOf()
       if (
@@ -970,6 +1012,32 @@ function aggregateMergeTimeTrend(
       count: durations.length,
       averageHours: calculateAverage(durations),
       medianHours: calculateMedian(durations),
+    }
+  })
+}
+
+function buildMergeTimeTrendChartData(
+  trend: MergeTimeTrendPoint[],
+  rollingWindowBuckets: number,
+): MergeTimeTrendChartPoint[] {
+  return trend.map((point, index) => {
+    const startIndex = Math.max(0, index - rollingWindowBuckets + 1)
+    let weightedSum = 0
+    let totalCount = 0
+
+    for (let cursor = startIndex; cursor <= index; cursor += 1) {
+      const windowPoint = trend[cursor]
+      if (windowPoint.averageHours === null || windowPoint.count === 0) {
+        continue
+      }
+
+      weightedSum += windowPoint.averageHours * windowPoint.count
+      totalCount += windowPoint.count
+    }
+
+    return {
+      ...point,
+      rollingAverageHours: totalCount > 0 ? weightedSum / totalCount : null,
     }
   })
 }
@@ -1151,6 +1219,11 @@ function App() {
   const [prChartSeriesMode, setPrChartSeriesMode] = useState<ChartSeriesMode>('aggregate')
   const [prChartSingleRepoId, setPrChartSingleRepoId] = useState('')
   const [prChartMultiRepoIds, setPrChartMultiRepoIds] = useState<string[]>([])
+  const [cycleChartGranularity, setCycleChartGranularity] = useState<AggregationGranularity>('weekly')
+  const [cycleChartScopeMode, setCycleChartScopeMode] = useState<CommitsChartScopeMode>('all')
+  const [cycleChartSingleRepoId, setCycleChartSingleRepoId] = useState('')
+  const [cycleChartMultiRepoIds, setCycleChartMultiRepoIds] = useState<string[]>([])
+  const [cycleRollingWindow, setCycleRollingWindow] = useState<'2' | '4' | '8'>('4')
   const [rateLimitSnapshot, setRateLimitSnapshot] = useState<RateLimitSnapshot | null>(null)
   const [analysisDataByRepo, setAnalysisDataByRepo] = useState<Record<string, RepoAnalysisData>>({})
   const runSequenceRef = useRef(0)
@@ -1677,12 +1750,19 @@ function App() {
 
     return aggregateRepositoryActivity(analysisDataByRepo, prChartRepoIds, lastRunRange, prChartGranularity)
   }, [analysisDataByRepo, lastRunRange, prChartGranularity, prChartRepoIds])
-  const prChartData = useMemo(() => {
+  const prMergedChartData = useMemo(() => {
     if (!prChartAggregation) {
       return [] as ActivityChartDatum[]
     }
 
     return buildActivityChartData(prChartAggregation.series.prsMerged, prChartAggregation.repoIds)
+  }, [prChartAggregation])
+  const prOpenedChartData = useMemo(() => {
+    if (!prChartAggregation) {
+      return [] as ActivityChartDatum[]
+    }
+
+    return buildActivityChartData(prChartAggregation.series.prsOpened, prChartAggregation.repoIds)
   }, [prChartAggregation])
   const prChartLines = useMemo(() => {
     if (!prChartAggregation) {
@@ -1698,23 +1778,46 @@ function App() {
   const prChartSingleRepoValue =
     prChartSingleRepoId.length > 0 && analysisDataByRepo[prChartSingleRepoId] ? prChartSingleRepoId : loadedRepoIds[0] ?? ''
   const prChartMultiRepoValue = prChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
-  const prMergeTimeTrend = useMemo(() => {
-    if (!lastRunRange || prChartRepoIds.length === 0) {
+  const cycleChartRepoIds = useMemo(() => {
+    const validMultiRepoIds = cycleChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+    const effectiveSingleRepoId =
+      cycleChartSingleRepoId.length > 0 && analysisDataByRepo[cycleChartSingleRepoId]
+        ? cycleChartSingleRepoId
+        : loadedRepoIds[0]
+
+    if (cycleChartScopeMode === 'single') {
+      return effectiveSingleRepoId ? [effectiveSingleRepoId] : []
+    }
+
+    if (cycleChartScopeMode === 'multi') {
+      return validMultiRepoIds.length > 0 ? validMultiRepoIds : loadedRepoIds
+    }
+
+    return loadedRepoIds
+  }, [analysisDataByRepo, cycleChartMultiRepoIds, cycleChartScopeMode, cycleChartSingleRepoId, loadedRepoIds])
+  const cycleChartSingleRepoValue =
+    cycleChartSingleRepoId.length > 0 && analysisDataByRepo[cycleChartSingleRepoId]
+      ? cycleChartSingleRepoId
+      : loadedRepoIds[0] ?? ''
+  const cycleChartMultiRepoValue = cycleChartMultiRepoIds.filter((repoId) => analysisDataByRepo[repoId] !== undefined)
+  const cycleChartAggregation = useMemo(() => {
+    if (!lastRunRange || cycleChartRepoIds.length === 0) {
+      return null
+    }
+
+    return aggregateRepositoryActivity(analysisDataByRepo, cycleChartRepoIds, lastRunRange, cycleChartGranularity)
+  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRepoIds, lastRunRange])
+  const cycleMergeTimeTrend = useMemo(() => {
+    if (!lastRunRange || cycleChartRepoIds.length === 0) {
       return [] as MergeTimeTrendPoint[]
     }
 
-    return aggregateMergeTimeTrend(analysisDataByRepo, prChartRepoIds, lastRunRange, prChartGranularity)
-  }, [analysisDataByRepo, lastRunRange, prChartGranularity, prChartRepoIds])
-  const prMergeTimeTrendData = useMemo(
-    () =>
-      prMergeTimeTrend.map((point) => ({
-        bucketStart: point.bucketStart,
-        bucketLabel: point.bucketLabel,
-        averageHours: point.averageHours,
-        medianHours: point.medianHours,
-        count: point.count,
-      })),
-    [prMergeTimeTrend],
+    return aggregateMergeTimeTrend(analysisDataByRepo, cycleChartRepoIds, lastRunRange, cycleChartGranularity)
+  }, [analysisDataByRepo, cycleChartGranularity, cycleChartRepoIds, lastRunRange])
+  const cycleRollingWindowSize = Number(cycleRollingWindow)
+  const cycleMergeTimeTrendData = useMemo(
+    () => buildMergeTimeTrendChartData(cycleMergeTimeTrend, cycleRollingWindowSize),
+    [cycleMergeTimeTrend, cycleRollingWindowSize],
   )
 
   function handleToggleRepositorySelection(repoId: string) {
@@ -1805,15 +1908,19 @@ function App() {
     return defaultBranch
   }
 
-  async function fetchMergedPullRequestsForRepo(
+  async function fetchPullRequestsForRepo(
     trimmedToken: string,
     repoNameWithOwner: string,
     range: RunDateRange,
+    mode: 'merged' | 'opened',
   ): Promise<RawPullRequestRecord[]> {
     const pullRequests: RawPullRequestRecord[] = []
     let cursor: string | null = null
     let hasNextPage = true
-    const searchQuery = `repo:${repoNameWithOwner} is:pr is:merged merged:${range.startDay}..${range.endDay} sort:updated-desc`
+    const searchQuery =
+      mode === 'merged'
+        ? `repo:${repoNameWithOwner} is:pr is:merged merged:${range.startDay}..${range.endDay} sort:updated-desc`
+        : `repo:${repoNameWithOwner} is:pr created:${range.startDay}..${range.endDay} sort:updated-desc`
 
     while (hasNextPage) {
       const queryResult: { response: Response; payload: GitHubGraphQLResponse<SearchPullRequestsData> | null } =
@@ -2016,6 +2123,7 @@ function App() {
         repoId: repository.id,
         repoName: repository.nameWithOwner,
         pullRequests: [],
+        pullRequestsOpened: [],
         issuesOpened: [],
         issuesClosed: [],
         commits: [],
@@ -2112,12 +2220,22 @@ function App() {
 
       setRepoDataStatus(repository.id, 'prs', 'fetching')
       try {
-        const pullRequests = await fetchMergedPullRequestsForRepo(trimmedToken, repository.nameWithOwner, runRange)
+        const pullRequests = await fetchPullRequestsForRepo(trimmedToken, repository.nameWithOwner, runRange, 'merged')
+        if (!isRunActive(runId)) {
+          return
+        }
+        const pullRequestsOpened = await fetchPullRequestsForRepo(
+          trimmedToken,
+          repository.nameWithOwner,
+          runRange,
+          'opened',
+        )
         if (!isRunActive(runId)) {
           return
         }
 
         nextRawAnalysisByRepo[repository.id].pullRequests = pullRequests
+        nextRawAnalysisByRepo[repository.id].pullRequestsOpened = pullRequestsOpened
         setRepoDataStatus(repository.id, 'prs', 'done')
       } catch (error) {
         prStepHasErrors = true
@@ -2550,6 +2668,7 @@ function App() {
               <div className="aggregation-summary-grid">
                 <p>Scope repos: {aggregatedActivity.repoIds.length}</p>
                 <p>Commits: {aggregatedActivity.totals.commits}</p>
+                <p>PRs opened: {aggregatedActivity.totals.prsOpened}</p>
                 <p>PRs merged: {aggregatedActivity.totals.prsMerged}</p>
                 <p>Issues opened: {aggregatedActivity.totals.issuesOpened}</p>
                 <p>Issues closed: {aggregatedActivity.totals.issuesClosed}</p>
@@ -2565,12 +2684,15 @@ function App() {
                 </p>
               </div>
               <div className="aggregation-bucket-preview">
-                <h4>Recent Buckets (Commits / PRs / Issues Opened / Issues Closed)</h4>
+                <h4>Recent Buckets (Commits / PRs Opened / PRs Merged / Issues Opened / Issues Closed)</h4>
                 {aggregatedActivity.series.commits.length === 0 ? (
                   <p>No buckets in selected range.</p>
                 ) : (
                   <ul>
                     {aggregatedActivity.series.commits.slice(-5).map((commitPoint) => {
+                      const prOpenedPoint = aggregatedActivity.series.prsOpened.find(
+                        (seriesPoint) => seriesPoint.bucketStart === commitPoint.bucketStart,
+                      )
                       const prPoint = aggregatedActivity.series.prsMerged.find(
                         (seriesPoint) => seriesPoint.bucketStart === commitPoint.bucketStart,
                       )
@@ -2583,8 +2705,8 @@ function App() {
 
                       return (
                         <li key={commitPoint.bucketStart}>
-                          {commitPoint.bucketLabel}: {commitPoint.total} / {prPoint?.total ?? 0} /{' '}
-                          {openedPoint?.total ?? 0} / {closedPoint?.total ?? 0}
+                          {commitPoint.bucketLabel}: {commitPoint.total} / {prOpenedPoint?.total ?? 0} /{' '}
+                          {prPoint?.total ?? 0} / {openedPoint?.total ?? 0} / {closedPoint?.total ?? 0}
                         </li>
                       )
                     })}
@@ -2768,9 +2890,116 @@ function App() {
           )}
         </section>
 
-        <section className="panel dashboard-section" key="Pull Requests">
+        <section className="panel dashboard-section" key="PRs Opened">
           <div className="dashboard-section-header">
-            <h2>Pull Requests</h2>
+            <h2>PRs Opened</h2>
+            <div className="chart-control-bar">
+              <label>
+                Granularity
+                <select
+                  value={prChartGranularity}
+                  onChange={(event) => setPrChartGranularity(event.target.value as AggregationGranularity)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <label>
+                Scope
+                <select
+                  value={prChartScopeMode}
+                  onChange={(event) => setPrChartScopeMode(event.target.value as CommitsChartScopeMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="all">All loaded repos</option>
+                  <option value="multi">Multi-select repos</option>
+                  <option value="single">Single repo</option>
+                </select>
+              </label>
+              <label>
+                Series
+                <select
+                  value={prChartSeriesMode}
+                  onChange={(event) => setPrChartSeriesMode(event.target.value as ChartSeriesMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="aggregate">Aggregate line</option>
+                  <option value="byRepo">Per-repo lines</option>
+                </select>
+              </label>
+              {prChartScopeMode === 'single' && (
+                <label>
+                  Repo
+                  <select
+                    value={prChartSingleRepoValue}
+                    onChange={(event) => setPrChartSingleRepoId(event.target.value)}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {prChartScopeMode === 'multi' && (
+                <label>
+                  Repo Set
+                  <select
+                    multiple
+                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
+                    value={prChartMultiRepoValue}
+                    onChange={(event) => {
+                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
+                      setPrChartMultiRepoIds(selectedValues)
+                    }}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          </div>
+          {prChartAggregation ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <p>PRs Opened</p>
+                  <strong>{prChartAggregation.totals.prsOpened}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Repo Scope</p>
+                  <strong>{prChartAggregation.repoIds.length}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Bucket Count</p>
+                  <strong>{prChartAggregation.series.prsOpened.length}</strong>
+                </div>
+              </div>
+              <ActivityLineChart
+                data={prOpenedChartData}
+                seriesMode={prChartSeriesMode}
+                lines={prChartLines}
+                aggregateLabel="Opened PRs"
+                emptyMessage="No opened PR buckets in this range."
+              />
+            </>
+          ) : (
+            <div className="chart-placeholder">Run analysis to generate opened PR charts.</div>
+          )}
+        </section>
+
+        <section className="panel dashboard-section" key="PRs Merged">
+          <div className="dashboard-section-header">
+            <h2>PRs Merged</h2>
             <div className="chart-control-bar">
               <label>
                 Granularity
@@ -2854,24 +3083,12 @@ function App() {
                   <strong>{prChartAggregation.totals.prsMerged}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Merge Avg (hrs)</p>
-                  <strong>
-                    {prChartAggregation.mergeTime.averageHours === null
-                      ? '-'
-                      : prChartAggregation.mergeTime.averageHours.toFixed(1)}
-                  </strong>
+                  <p>Repo Scope</p>
+                  <strong>{prChartAggregation.repoIds.length}</strong>
                 </div>
                 <div className="stat-card">
-                  <p>Merge Median (hrs)</p>
-                  <strong>
-                    {prChartAggregation.mergeTime.medianHours === null
-                      ? '-'
-                      : prChartAggregation.mergeTime.medianHours.toFixed(1)}
-                  </strong>
-                </div>
-                <div className="stat-card">
-                  <p>Merge Samples</p>
-                  <strong>{prChartAggregation.mergeTime.count}</strong>
+                  <p>Bucket Count</p>
+                  <strong>{prChartAggregation.series.prsMerged.length}</strong>
                 </div>
                 <div className="stat-card">
                   <p>Draft to Ready</p>
@@ -2883,20 +3100,139 @@ function App() {
                 </div>
               </div>
               <ActivityLineChart
-                data={prChartData}
+                data={prMergedChartData}
                 seriesMode={prChartSeriesMode}
                 lines={prChartLines}
                 aggregateLabel="Merged PRs"
                 emptyMessage="No merged PR buckets in this range."
               />
+            </>
+          ) : (
+            <div className="chart-placeholder">Run analysis to generate merged PR charts.</div>
+          )}
+        </section>
+
+        <section className="panel dashboard-section" key="Issues">
+          <h2>Issues</h2>
+          <p>Charts and controls will be added in upcoming checkpoints.</p>
+          <div className="chart-placeholder">No data yet</div>
+        </section>
+
+        <section className="panel dashboard-section" key="Cycle Time">
+          <div className="dashboard-section-header">
+            <h2>Cycle Time</h2>
+            <div className="chart-control-bar">
+              <label>
+                Granularity
+                <select
+                  value={cycleChartGranularity}
+                  onChange={(event) => setCycleChartGranularity(event.target.value as AggregationGranularity)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <label>
+                Scope
+                <select
+                  value={cycleChartScopeMode}
+                  onChange={(event) => setCycleChartScopeMode(event.target.value as CommitsChartScopeMode)}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="all">All loaded repos</option>
+                  <option value="multi">Multi-select repos</option>
+                  <option value="single">Single repo</option>
+                </select>
+              </label>
+              <label>
+                Smoothing
+                <select
+                  value={cycleRollingWindow}
+                  onChange={(event) => setCycleRollingWindow(event.target.value as '2' | '4' | '8')}
+                  disabled={loadedRepoCount === 0}
+                >
+                  <option value="2">2 buckets</option>
+                  <option value="4">4 buckets</option>
+                  <option value="8">8 buckets</option>
+                </select>
+              </label>
+              {cycleChartScopeMode === 'single' && (
+                <label>
+                  Repo
+                  <select
+                    value={cycleChartSingleRepoValue}
+                    onChange={(event) => setCycleChartSingleRepoId(event.target.value)}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {cycleChartScopeMode === 'multi' && (
+                <label>
+                  Repo Set
+                  <select
+                    multiple
+                    size={Math.min(Math.max(loadedRepoOptions.length, 2), 6)}
+                    value={cycleChartMultiRepoValue}
+                    onChange={(event) => {
+                      const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value)
+                      setCycleChartMultiRepoIds(selectedValues)
+                    }}
+                    disabled={loadedRepoOptions.length === 0}
+                  >
+                    {loadedRepoOptions.map((repoOption) => (
+                      <option key={repoOption.repoId} value={repoOption.repoId}>
+                        {repoOption.repoName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          </div>
+          {cycleChartAggregation ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <p>Merge Avg (hrs)</p>
+                  <strong>
+                    {cycleChartAggregation.mergeTime.averageHours === null
+                      ? '-'
+                      : cycleChartAggregation.mergeTime.averageHours.toFixed(1)}
+                  </strong>
+                </div>
+                <div className="stat-card">
+                  <p>Merge Median (hrs)</p>
+                  <strong>
+                    {cycleChartAggregation.mergeTime.medianHours === null
+                      ? '-'
+                      : cycleChartAggregation.mergeTime.medianHours.toFixed(1)}
+                  </strong>
+                </div>
+                <div className="stat-card">
+                  <p>Merge Samples</p>
+                  <strong>{cycleChartAggregation.mergeTime.count}</strong>
+                </div>
+                <div className="stat-card">
+                  <p>Repo Scope</p>
+                  <strong>{cycleChartAggregation.repoIds.length}</strong>
+                </div>
+              </div>
               <div className="pr-trend-card">
-                <h3>PR Merge Time Trend (hours)</h3>
-                {prMergeTimeTrendData.length === 0 ? (
+                <h3>Merge Turnaround Trend (hours)</h3>
+                {cycleMergeTimeTrendData.length === 0 ? (
                   <p className="commits-chart-empty">No merge-time trend points in this range.</p>
                 ) : (
                   <div className="commits-chart-canvas">
                     <ResponsiveContainer width="100%" height={300}>
-                      <LineChart data={prMergeTimeTrendData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
+                      <LineChart data={cycleMergeTimeTrendData} margin={{ top: 10, right: 24, left: 10, bottom: 8 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#d8e2ce" />
                         <XAxis dataKey="bucketLabel" minTickGap={28} tick={{ fill: '#47603a', fontSize: 12 }} />
                         <YAxis tick={{ fill: '#47603a', fontSize: 12 }} />
@@ -2908,20 +3244,22 @@ function App() {
                         <Line
                           type="monotone"
                           dataKey="averageHours"
-                          name="Average hours"
+                          name="Bucket average"
                           stroke="#1f5d8b"
-                          strokeWidth={2}
+                          strokeWidth={1.5}
                           dot={false}
                           activeDot={{ r: 4 }}
+                          connectNulls
                         />
                         <Line
                           type="monotone"
-                          dataKey="medianHours"
-                          name="Median hours"
+                          dataKey="rollingAverageHours"
+                          name={`Rolling avg (${cycleRollingWindowSize} buckets)`}
                           stroke="#8b651b"
-                          strokeWidth={2}
+                          strokeWidth={2.5}
                           dot={false}
                           activeDot={{ r: 4 }}
+                          connectNulls
                         />
                       </LineChart>
                     </ResponsiveContainer>
@@ -2930,17 +3268,9 @@ function App() {
               </div>
             </>
           ) : (
-            <div className="chart-placeholder">Run analysis to generate PR charts.</div>
+            <div className="chart-placeholder">Run analysis to generate cycle-time charts.</div>
           )}
         </section>
-
-        {['Issues', 'Cycle Time'].map((section) => (
-          <section className="panel dashboard-section" key={section}>
-            <h2>{section}</h2>
-            <p>Charts and controls will be added in upcoming checkpoints.</p>
-            <div className="chart-placeholder">No data yet</div>
-          </section>
-        ))}
       </main>
 
       {isTokenHelpOpen && (
